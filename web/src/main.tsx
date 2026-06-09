@@ -240,6 +240,11 @@ function App() {
     machineModal.openDeleteMachineModal(machine.id);
   }
 
+  function reconnectSelectedMachine() {
+    machineMenuState.closeMachineMenu();
+    void checkSelected();
+  }
+
   function saveMachineConfig(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     machineModal.saveMachineConfig();
@@ -581,6 +586,14 @@ function App() {
             role="menu"
             onMouseDown={(event) => event.stopPropagation()}
           >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={reconnectSelectedMachine}
+            >
+              <RefreshCw size={15} />
+              Reconnect
+            </button>
             <button
               type="button"
               role="menuitem"
