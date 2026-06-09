@@ -18,6 +18,8 @@ export interface WorkbenchPane {
   activeTabId: string;
 }
 
+export type TabDropPosition = "before" | "after" | "end";
+
 const initialPaneId = "pane-1";
 const initialTab = createFilesTab();
 
@@ -107,6 +109,46 @@ export const workbenchBunja = bunja(() => {
     );
   }
 
+  function moveTab(
+    sourcePaneId: string,
+    tabId: string,
+    targetPaneId: string,
+    targetTabId: string | undefined,
+    position: TabDropPosition,
+  ) {
+    store.set(panesAtom, (current) => {
+      const sourcePane = current.find((pane) => pane.id === sourcePaneId);
+      const targetPane = current.find((pane) => pane.id === targetPaneId);
+      const movingTab = sourcePane?.tabs.find((tab) => tab.id === tabId);
+      if (!sourcePane || !targetPane || !movingTab) return current;
+
+      if (sourcePaneId !== targetPaneId && sourcePane.tabs.length <= 1) {
+        return current;
+      }
+
+      return current.map((pane) => {
+        if (sourcePaneId === targetPaneId && pane.id === sourcePaneId) {
+          return moveTabWithinPane(pane, tabId, targetTabId, position);
+        }
+
+        if (pane.id === sourcePaneId) {
+          const tabs = pane.tabs.filter((tab) => tab.id !== tabId);
+          const activeTabId = pane.activeTabId === tabId
+            ? tabs[0]?.id ?? ""
+            : pane.activeTabId;
+          return { ...pane, tabs, activeTabId };
+        }
+
+        if (pane.id === targetPaneId) {
+          const tabs = insertTab(pane.tabs, movingTab, targetTabId, position);
+          return { ...pane, tabs, activeTabId: movingTab.id };
+        }
+
+        return pane;
+      });
+    });
+  }
+
   return {
     layoutAtom,
     activeFeatureAtom,
@@ -118,8 +160,44 @@ export const workbenchBunja = bunja(() => {
     addFilesTab,
     selectTab,
     closeTab,
+    moveTab,
   };
 });
+
+function moveTabWithinPane(
+  pane: WorkbenchPane,
+  tabId: string,
+  targetTabId: string | undefined,
+  position: TabDropPosition,
+): WorkbenchPane {
+  if (targetTabId === tabId) return pane;
+
+  const movingTab = pane.tabs.find((tab) => tab.id === tabId);
+  if (!movingTab) return pane;
+
+  const remainingTabs = pane.tabs.filter((tab) => tab.id !== tabId);
+  const tabs = insertTab(remainingTabs, movingTab, targetTabId, position);
+  return { ...pane, tabs, activeTabId: tabId };
+}
+
+function insertTab(
+  tabs: WorkbenchTab[],
+  tab: WorkbenchTab,
+  targetTabId: string | undefined,
+  position: TabDropPosition,
+): WorkbenchTab[] {
+  if (position === "end" || !targetTabId) return [...tabs, tab];
+
+  const targetIndex = tabs.findIndex((item) => item.id === targetTabId);
+  if (targetIndex < 0) return [...tabs, tab];
+
+  const insertIndex = position === "before" ? targetIndex : targetIndex + 1;
+  return [
+    ...tabs.slice(0, insertIndex),
+    tab,
+    ...tabs.slice(insertIndex),
+  ];
+}
 
 function createFilesTab(): WorkbenchTab {
   return {

@@ -69,6 +69,7 @@ import { machineStoreBunja } from "./state/machine-store.ts";
 import { Machine } from "./state/machines.ts";
 import type { ConnectionState } from "./state/types.ts";
 import {
+  type TabDropPosition,
   workbenchBunja,
   type WorkbenchFeature,
   type WorkbenchPane,
@@ -83,11 +84,17 @@ const machinePanelMinWidth = 212;
 const machinePanelMaxWidth = 420;
 const minimumWorkbenchWidth = 360;
 const machineRailWidth = 64;
+const workbenchTabDragType = "application/x-wgo-workbench-tab";
 
 type EntryMenuState = {
   entry: FsEntry;
   x: number;
   y: number;
+};
+
+type WorkbenchTabDragData = {
+  paneId: string;
+  tabId: string;
 };
 
 function App() {
@@ -570,6 +577,7 @@ function App() {
               addFilesTab={workbench.addFilesTab}
               selectTab={workbench.selectTab}
               closeTab={workbench.closeTab}
+              moveTab={workbench.moveTab}
               machine={selected}
               isPaired={selectedIsPaired}
               connectionEpoch={connectionEpoch}
@@ -904,6 +912,7 @@ function Workbench(
     addFilesTab,
     selectTab,
     closeTab,
+    moveTab,
     machine,
     isPaired,
     connectionEpoch,
@@ -917,6 +926,13 @@ function Workbench(
     addFilesTab: (paneId: string) => void;
     selectTab: (paneId: string, tabId: string) => void;
     closeTab: (paneId: string, tabId: string) => void;
+    moveTab: (
+      sourcePaneId: string,
+      tabId: string,
+      targetPaneId: string,
+      targetTabId: string | undefined,
+      position: TabDropPosition,
+    ) => void;
     machine?: Machine;
     isPaired: boolean;
     connectionEpoch: number;
@@ -943,6 +959,7 @@ function Workbench(
               addFilesTab={addFilesTab}
               selectTab={selectTab}
               closeTab={closeTab}
+              moveTab={moveTab}
               machine={machine}
               isPaired={isPaired}
               connectionEpoch={connectionEpoch}
@@ -965,6 +982,7 @@ function WorkbenchPaneView(
     addFilesTab,
     selectTab,
     closeTab,
+    moveTab,
     machine,
     isPaired,
     connectionEpoch,
@@ -978,6 +996,13 @@ function WorkbenchPaneView(
     addFilesTab: (paneId: string) => void;
     selectTab: (paneId: string, tabId: string) => void;
     closeTab: (paneId: string, tabId: string) => void;
+    moveTab: (
+      sourcePaneId: string,
+      tabId: string,
+      targetPaneId: string,
+      targetTabId: string | undefined,
+      position: TabDropPosition,
+    ) => void;
     machine?: Machine;
     isPaired: boolean;
     connectionEpoch: number;
@@ -986,6 +1011,11 @@ function WorkbenchPaneView(
 ) {
   const { removePane: removeLayoutPane, split } = useLayout();
   const [newTabMenuOpen, setNewTabMenuOpen] = useState(false);
+  const [draggingTabId, setDraggingTabId] = useState<string>();
+  const [tabDropTarget, setTabDropTarget] = useState<{
+    tabId?: string;
+    position: TabDropPosition;
+  }>();
   const newTabMenuRef = useRef<HTMLDivElement>(null);
   const canClosePane = paneCount > 1;
 
@@ -1012,6 +1042,22 @@ function WorkbenchPaneView(
     };
   }, [newTabMenuOpen]);
 
+  useEffect(() => {
+    if (!draggingTabId) return;
+
+    function clearTabDragState() {
+      setDraggingTabId(undefined);
+      setTabDropTarget(undefined);
+    }
+
+    globalThis.addEventListener("dragend", clearTabDragState, true);
+    globalThis.addEventListener("drop", clearTabDragState, true);
+    return () => {
+      globalThis.removeEventListener("dragend", clearTabDragState, true);
+      globalThis.removeEventListener("drop", clearTabDragState, true);
+    };
+  }, [draggingTabId]);
+
   function splitPane(direction: "horizontal" | "vertical") {
     const newPaneId = addPane();
     split(nodeId, direction, newPaneId, "after");
@@ -1036,22 +1082,96 @@ function WorkbenchPaneView(
     setNewTabMenuOpen(false);
   }
 
+  function moveDroppedTab(
+    dragData: WorkbenchTabDragData,
+    targetTabId: string | undefined,
+    position: TabDropPosition,
+  ) {
+    moveTab(
+      dragData.paneId,
+      dragData.tabId,
+      pane.id,
+      targetTabId,
+      position,
+    );
+    setDraggingTabId(undefined);
+    setTabDropTarget(undefined);
+  }
+
+  function handleTabStripDragOver(event: React.DragEvent<HTMLDivElement>) {
+    if (!hasWorkbenchTabDragData(event)) return;
+    if (
+      event.target instanceof Element &&
+      event.target.closest(".workbench-tab")
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setTabDropTarget({ position: "end" });
+  }
+
+  function handleTabStripDrop(event: React.DragEvent<HTMLDivElement>) {
+    if (
+      event.target instanceof Element &&
+      event.target.closest(".workbench-tab")
+    ) {
+      return;
+    }
+    const dragData = readWorkbenchTabDragData(event);
+    if (!dragData) return;
+    event.preventDefault();
+    moveDroppedTab(dragData, undefined, "end");
+  }
+
+  function handleTabStripDragLeave(event: React.DragEvent<HTMLDivElement>) {
+    const relatedTarget = event.relatedTarget;
+    if (
+      relatedTarget instanceof Node &&
+      event.currentTarget.contains(relatedTarget)
+    ) {
+      return;
+    }
+    setTabDropTarget(undefined);
+  }
+
   return (
     <section className="workbench-pane">
       <header className="workbench-pane-head">
         <Handle className="pane-handle">
           <GripVertical size={14} />
         </Handle>
-        <div className="workbench-tabs" role="tablist">
+        <div
+          className={tabDropTarget?.position === "end"
+            ? "workbench-tabs drop-at-end"
+            : "workbench-tabs"}
+          role="tablist"
+          onDragOver={handleTabStripDragOver}
+          onDrop={handleTabStripDrop}
+          onDragLeave={handleTabStripDragLeave}
+        >
           {pane.tabs.map((tab) => (
             <WorkbenchTabItem
               key={tab.id}
+              paneId={pane.id}
               tab={tab}
               machine={machine}
               active={tab.id === pane.activeTabId}
+              dragging={draggingTabId === tab.id}
+              dropPosition={tabDropTarget?.tabId === tab.id
+                ? tabDropTarget.position
+                : undefined}
               showClose={pane.tabs.length > 1 || canClosePane}
               onSelect={() => selectTab(pane.id, tab.id)}
               onClose={() => closeWorkbenchTab(tab.id)}
+              onDragStart={() => setDraggingTabId(tab.id)}
+              onDragEnd={() => {
+                setDraggingTabId(undefined);
+                setTabDropTarget(undefined);
+              }}
+              onDragOverTab={(tabId, position) =>
+                setTabDropTarget({ tabId, position })}
+              onDropTab={moveDroppedTab}
             />
           ))}
         </div>
@@ -1136,23 +1256,95 @@ function WorkbenchPaneView(
 }
 
 function WorkbenchTabItem(
-  { tab, machine, active, showClose, onSelect, onClose }: {
+  {
+    paneId,
+    tab,
+    machine,
+    active,
+    dragging,
+    dropPosition,
+    showClose,
+    onSelect,
+    onClose,
+    onDragStart,
+    onDragEnd,
+    onDragOverTab,
+    onDropTab,
+  }: {
+    paneId: string;
     tab: WorkbenchTab;
     machine?: Machine;
     active: boolean;
+    dragging: boolean;
+    dropPosition?: TabDropPosition;
     showClose: boolean;
     onSelect: () => void;
     onClose: () => void;
+    onDragStart: () => void;
+    onDragEnd: () => void;
+    onDragOverTab: (tabId: string, position: TabDropPosition) => void;
+    onDropTab: (
+      dragData: WorkbenchTabDragData,
+      targetTabId: string,
+      position: TabDropPosition,
+    ) => void;
   },
 ) {
   const label = useWorkbenchTabLabel(tab, machine);
+  const className = [
+    "workbench-tab",
+    active ? "active" : "",
+    dragging ? "dragging" : "",
+    dropPosition === "before" ? "drop-before" : "",
+    dropPosition === "after" ? "drop-after" : "",
+  ].filter(Boolean).join(" ");
+
+  function handleDragOver(event: React.DragEvent<HTMLDivElement>) {
+    if (!hasWorkbenchTabDragData(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    const rect = event.currentTarget.getBoundingClientRect();
+    const position = event.clientX < rect.left + rect.width / 2
+      ? "before"
+      : "after";
+    onDragOverTab(tab.id, position);
+  }
+
+  function handleDrop(event: React.DragEvent<HTMLDivElement>) {
+    const dragData = readWorkbenchTabDragData(event);
+    if (!dragData) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const position = event.clientX < rect.left + rect.width / 2
+      ? "before"
+      : "after";
+    onDropTab(dragData, tab.id, position);
+  }
 
   return (
-    <div className={active ? "workbench-tab active" : "workbench-tab"}>
+    <div
+      className={className}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
       <button
         type="button"
         role="tab"
         aria-selected={active}
+        draggable
+        onDragStart={(event) => {
+          event.stopPropagation();
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData(
+            workbenchTabDragType,
+            JSON.stringify({ paneId, tabId: tab.id }),
+          );
+          event.dataTransfer.setData("text/plain", label);
+          onDragStart();
+        }}
+        onDragEnd={onDragEnd}
         onClick={onSelect}
         title={label}
       >
@@ -1164,6 +1356,8 @@ function WorkbenchTabItem(
           <button
             type="button"
             className="tab-close"
+            draggable={false}
+            onMouseDown={(event) => event.stopPropagation()}
             onClick={onClose}
             title="Close tab"
             aria-label={`Close ${label}`}
@@ -1227,6 +1421,28 @@ function PaneDivider(
       onKeyDown={onKeyDown}
     />
   );
+}
+
+function hasWorkbenchTabDragData(event: React.DragEvent): boolean {
+  return Array.from(event.dataTransfer.types).includes(workbenchTabDragType);
+}
+
+function readWorkbenchTabDragData(
+  event: React.DragEvent,
+): WorkbenchTabDragData | undefined {
+  if (!hasWorkbenchTabDragData(event)) return undefined;
+  try {
+    const data = JSON.parse(event.dataTransfer.getData(workbenchTabDragType));
+    if (
+      typeof data?.paneId !== "string" ||
+      typeof data?.tabId !== "string"
+    ) {
+      return undefined;
+    }
+    return { paneId: data.paneId, tabId: data.tabId };
+  } catch {
+    return undefined;
+  }
 }
 
 function Explorer(

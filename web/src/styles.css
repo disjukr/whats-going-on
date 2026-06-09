@@ -640,7 +640,12 @@ button.rail-machine.active:hover {
   overflow: hidden;
 }
 
+.workbench-tabs.drop-at-end {
+  box-shadow: inset -2px 0 0 #4f8cff;
+}
+
 .workbench-tab {
+  position: relative;
   display: flex;
   align-items: center;
   min-width: 0;
@@ -648,6 +653,36 @@ button.rail-machine.active:hover {
   height: 100%;
   border-right: 1px solid #e4e8ef;
   background: #eef1f5;
+}
+
+.workbench-tab::before,
+.workbench-tab::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  z-index: 2;
+  width: 2px;
+  border-radius: 999px;
+  background: transparent;
+  pointer-events: none;
+}
+
+.workbench-tab::before {
+  left: 0;
+}
+
+.workbench-tab::after {
+  right: 0;
+}
+
+.workbench-tab.drop-before::before,
+.workbench-tab.drop-after::after {
+  background: #4f8cff;
+}
+
+.workbench-tab.dragging {
+  opacity: 0.48;
 }
 
 .workbench-tab.active {
@@ -674,6 +709,11 @@ button.rail-machine.active:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: grab;
+}
+
+.workbench-tab > button[role="tab"]:active {
+  cursor: grabbing;
 }
 
 .workbench-tab.active > button {
