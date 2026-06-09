@@ -173,21 +173,6 @@ button.rail-machine.active:hover {
   letter-spacing: 0;
 }
 
-.rail-dot {
-  position: absolute;
-  right: 3px;
-  bottom: 3px;
-  width: 11px;
-  height: 11px;
-  border: 3px solid #242832;
-  border-radius: 50%;
-  background: #f04438;
-}
-
-.rail-dot.paired {
-  background: #22c55e;
-}
-
 .rail-action {
   color: #38b86f;
 }
@@ -320,7 +305,7 @@ button.rail-machine.active:hover {
   white-space: nowrap;
 }
 
-.global-pairing-pill {
+.global-connection-pill {
   display: inline-flex;
   justify-self: end;
   align-items: center;
@@ -336,24 +321,24 @@ button.rail-machine.active:hover {
   white-space: nowrap;
 }
 
-.global-pairing-pill:hover:not(:disabled),
-.global-pairing-pill:focus-visible {
+.global-connection-pill:hover:not(:disabled),
+.global-connection-pill:focus-visible {
   border-color: #566074;
   background: #343946;
   color: #ffffff;
 }
 
-.global-pairing-pill:active {
+.global-connection-pill:active {
   transform: translateY(1px);
 }
 
-.global-pairing-pill.checking {
+.global-connection-pill.checking {
   border-color: #566074;
   background: #343946;
   color: #ffffff;
 }
 
-.global-pairing-status-icon {
+.global-connection-status-icon {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -362,36 +347,36 @@ button.rail-machine.active:hover {
   height: 14px;
 }
 
-.global-pairing-dot,
-.global-pairing-refresh {
+.global-connection-dot,
+.global-connection-refresh {
   position: absolute;
   transition: opacity 0.12s ease;
 }
 
-.global-pairing-dot {
+.global-connection-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: #f04438;
 }
 
-.global-pairing-pill.paired .global-pairing-dot {
+.global-connection-pill.connected .global-connection-dot {
   background: #22c55e;
 }
 
-.global-pairing-refresh {
+.global-connection-refresh {
   opacity: 0;
 }
 
-.global-pairing-pill:hover .global-pairing-dot,
-.global-pairing-pill:focus-visible .global-pairing-dot,
-.global-pairing-pill.checking .global-pairing-dot {
+.global-connection-pill:hover .global-connection-dot,
+.global-connection-pill:focus-visible .global-connection-dot,
+.global-connection-pill.checking .global-connection-dot {
   opacity: 0;
 }
 
-.global-pairing-pill:hover .global-pairing-refresh,
-.global-pairing-pill:focus-visible .global-pairing-refresh,
-.global-pairing-pill.checking .global-pairing-refresh {
+.global-connection-pill:hover .global-connection-refresh,
+.global-connection-pill:focus-visible .global-connection-refresh,
+.global-connection-pill.checking .global-connection-refresh {
   opacity: 1;
 }
 
@@ -550,6 +535,37 @@ button.rail-machine.active:hover {
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.machine-title-button.checking .machine-title-text {
+  background: linear-gradient(
+    100deg,
+    #20242d 0%,
+    #20242d 34%,
+    #ffffff 50%,
+    #20242d 66%,
+    #20242d 100%
+  );
+  background-clip: text;
+  background-size: 240% 100%;
+  color: transparent;
+  animation: machine-title-shimmer 1.4s linear infinite;
+}
+
+.machine-title-connection-indicator {
+  flex: 0 0 auto;
+  color: #d92d20;
+  stroke-width: 2.4;
+}
+
+@keyframes machine-title-shimmer {
+  from {
+    background-position: 120% 0;
+  }
+
+  to {
+    background-position: -120% 0;
+  }
 }
 
 .machine-title-button svg {

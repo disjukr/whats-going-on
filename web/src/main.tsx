@@ -45,6 +45,7 @@ import {
   Settings,
   Terminal,
   Trash2,
+  WifiOff,
   X,
 } from "lucide-react";
 import "./styles.css";
@@ -66,6 +67,7 @@ import { machineMenuBunja } from "./state/machine-menu.ts";
 import { machineModalBunja } from "./state/machine-modal.ts";
 import { machineStoreBunja } from "./state/machine-store.ts";
 import { Machine } from "./state/machines.ts";
+import type { ConnectionState } from "./state/types.ts";
 import {
   workbenchBunja,
   type WorkbenchFeature,
@@ -414,11 +416,6 @@ function App() {
               <span className="machine-avatar">
                 {machineInitials(machine.name)}
               </span>
-              <span
-                className={machine.clientId && machine.clientSecret
-                  ? "rail-dot paired"
-                  : "rail-dot"}
-              />
             </button>
           ))}
         </nav>
@@ -468,10 +465,9 @@ function App() {
         <div className="global-machine-title">
           <span>{selected?.name ?? "No machine"}</span>
         </div>
-        <PairingPill
+        <ConnectionPill
           machine={selected}
-          paired={selectedIsPaired}
-          checking={connection.phase === "checking"}
+          connection={connection}
           onRefresh={() => void checkSelected()}
         />
       </header>
@@ -491,7 +487,10 @@ function App() {
                       ? (
                         <button
                           type="button"
-                          className="machine-title-button"
+                          className={[
+                            "machine-title-button",
+                            connection.phase === "checking" ? "checking" : "",
+                          ].filter(Boolean).join(" ")}
                           onMouseDown={(event) => event.stopPropagation()}
                           onClick={(event) =>
                             openMachineTitleMenu(event, selected)}
@@ -501,6 +500,15 @@ function App() {
                           <span className="machine-title-text">
                             {selected.name}
                           </span>
+                          {connection.phase === "offline"
+                            ? (
+                              <WifiOff
+                                size={14}
+                                className="machine-title-connection-indicator"
+                                aria-hidden="true"
+                              />
+                            )
+                            : null}
                           <ChevronDown size={16} />
                         </button>
                       )
@@ -776,19 +784,25 @@ function machineInitials(name: string): string {
   return letters || "PC";
 }
 
-function PairingPill(
-  { machine, paired, checking, onRefresh }: {
+function ConnectionPill(
+  { machine, connection, onRefresh }: {
     machine?: Machine;
-    paired: boolean;
-    checking: boolean;
+    connection: ConnectionState;
     onRefresh: () => void;
   },
 ) {
   if (!machine) return null;
 
+  const checking = connection.phase === "checking";
+  const connected = connection.phase === "reachable";
+  const label = checking
+    ? "Connecting"
+    : connected
+    ? "Connected"
+    : "Unconnected";
   const className = [
-    "global-pairing-pill",
-    paired ? "paired" : "",
+    "global-connection-pill",
+    connected ? "connected" : "",
     checking ? "checking" : "",
   ].filter(Boolean).join(" ");
 
@@ -797,22 +811,20 @@ function PairingPill(
       type="button"
       className={className}
       onClick={onRefresh}
-      title={checking ? "Checking pairing status" : "Refresh pairing status"}
-      aria-label={checking
-        ? "Checking pairing status"
-        : "Refresh pairing status"}
+      title={checking ? "Connecting" : connection.message}
+      aria-label={checking ? "Connecting" : `Connection status: ${label}`}
       aria-busy={checking}
     >
-      <span className="global-pairing-status-icon" aria-hidden="true">
-        <span className="global-pairing-dot" />
+      <span className="global-connection-status-icon" aria-hidden="true">
+        <span className="global-connection-dot" />
         <RefreshCw
           size={13}
           className={checking
-            ? "global-pairing-refresh spin"
-            : "global-pairing-refresh"}
+            ? "global-connection-refresh spin"
+            : "global-connection-refresh"}
         />
       </span>
-      <span>{paired ? "Paired" : "Unpaired"}</span>
+      <span>{label}</span>
     </button>
   );
 }

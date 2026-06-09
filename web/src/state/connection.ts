@@ -40,13 +40,8 @@ export const connectionBunja = bunja(() => {
   }
 
   function markDatagramPingTimeout() {
-    const current = store.get(connectionAtom);
-    store.set(
-      connectionAtom,
-      current.phase === "reachable"
-        ? { ...current, message: "No pong" }
-        : { phase: "checking", message: "No pong" },
-    );
+    connectionReachable = false;
+    store.set(connectionAtom, { phase: "offline", message: "No pong" });
   }
 
   function restartPingLoop() {
