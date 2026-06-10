@@ -22,6 +22,7 @@ import {
 interface WorkbenchTabItemProps {
   dragging: boolean;
   dropPosition?: TabDropPosition;
+  nodeId: string;
   onClose: () => void;
   onDragStart: () => void;
   onDragEnd: () => void;
@@ -37,6 +38,7 @@ export function WorkbenchTabItem(
   {
     dragging,
     dropPosition,
+    nodeId,
     onClose,
     onDragStart,
     onDragEnd,
@@ -100,7 +102,11 @@ export function WorkbenchTabItem(
           event.dataTransfer.effectAllowed = "move";
           event.dataTransfer.setData(
             workbenchTabDragType,
-            JSON.stringify({ paneId: tabState.paneId, tabId: currentTabId }),
+            JSON.stringify({
+              nodeId,
+              paneId: tabState.paneId,
+              tabId: currentTabId,
+            }),
           );
           event.dataTransfer.setData("text/plain", label);
           onDragStart();

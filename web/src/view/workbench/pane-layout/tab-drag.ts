@@ -3,6 +3,7 @@ import type { DragEvent } from "react";
 export const workbenchTabDragType = "application/x-wgo-workbench-tab";
 
 export interface WorkbenchTabDragData {
+  nodeId: string;
   paneId: string;
   tabId: string;
 }
@@ -23,12 +24,13 @@ export function readWorkbenchTabDragData(
   try {
     const data = JSON.parse(event.dataTransfer.getData(workbenchTabDragType));
     if (
+      typeof data?.nodeId !== "string" ||
       typeof data?.paneId !== "string" ||
       typeof data?.tabId !== "string"
     ) {
       return undefined;
     }
-    return { paneId: data.paneId, tabId: data.tabId };
+    return { nodeId: data.nodeId, paneId: data.paneId, tabId: data.tabId };
   } catch {
     return undefined;
   }

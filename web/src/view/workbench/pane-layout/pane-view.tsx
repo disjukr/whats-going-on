@@ -114,12 +114,15 @@ export function WorkbenchPaneView(
     targetTabId: string | undefined,
     position: TabDropPosition,
   ) {
-    paneState.moveTab(
+    const sourcePaneRemoved = paneState.moveTab(
       dragData.paneId,
       dragData.tabId,
       targetTabId,
       position,
     );
+    if (sourcePaneRemoved) {
+      removeLayoutPane(dragData.nodeId);
+    }
     setDraggingTabId(undefined);
     setTabDropTarget(undefined);
   }
@@ -189,6 +192,7 @@ export function WorkbenchPaneView(
                 dropPosition={tabDropTarget?.tabId === tab.id
                   ? tabDropTarget.position
                   : undefined}
+                nodeId={nodeId}
                 onClose={() =>
                   closeWorkbenchTab(tab.id)}
                 onDragStart={() =>

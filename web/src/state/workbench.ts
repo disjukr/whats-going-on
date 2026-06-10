@@ -183,39 +183,58 @@ export const workbenchBunja = bunja(() => {
     targetPaneId: string,
     targetTabId: string | undefined,
     position: TabDropPosition,
-  ) {
-    updatePanes((current) => {
-      const sourcePane = current.find((pane) => pane.id === sourcePaneId);
-      const targetPane = current.find((pane) => pane.id === targetPaneId);
+  ): boolean {
+    const currentState = store.get(stateAtom);
+    const currentSourcePane = currentState.panes.find((pane) =>
+      pane.id === sourcePaneId
+    );
+    const currentTargetPane = currentState.panes.find((pane) =>
+      pane.id === targetPaneId
+    );
+    const currentMovingTab = currentSourcePane?.tabs.find((tab) =>
+      tab.id === tabId
+    );
+    const removeSourcePane = sourcePaneId !== targetPaneId &&
+      currentSourcePane !== undefined &&
+      currentTargetPane !== undefined &&
+      currentMovingTab !== undefined &&
+      currentSourcePane.tabs.length <= 1;
+
+    store.set(stateAtom, (current) => {
+      const sourcePane = current.panes.find((pane) => pane.id === sourcePaneId);
+      const targetPane = current.panes.find((pane) => pane.id === targetPaneId);
       const movingTab = sourcePane?.tabs.find((tab) => tab.id === tabId);
       if (!sourcePane || !targetPane || !movingTab) return current;
 
-      if (sourcePaneId !== targetPaneId && sourcePane.tabs.length <= 1) {
-        return current;
-      }
-
-      return current.map((pane) => {
+      const panes = current.panes.flatMap((pane) => {
         if (sourcePaneId === targetPaneId && pane.id === sourcePaneId) {
-          return moveTabWithinPane(pane, tabId, targetTabId, position);
+          return [moveTabWithinPane(pane, tabId, targetTabId, position)];
         }
 
         if (pane.id === sourcePaneId) {
           const tabs = pane.tabs.filter((tab) => tab.id !== tabId);
+          if (tabs.length === 0) return [];
           const activeTabId = pane.activeTabId === tabId
             ? tabs[0]?.id ?? ""
             : pane.activeTabId;
-          return { ...pane, tabs, activeTabId };
+          return [{ ...pane, tabs, activeTabId }];
         }
 
         if (pane.id === targetPaneId) {
           const tabs = insertTab(pane.tabs, movingTab, targetTabId, position);
-          return { ...pane, tabs, activeTabId: movingTab.id };
+          return [{ ...pane, tabs, activeTabId: movingTab.id }];
         }
 
-        return pane;
+        return [pane];
       });
+
+      return {
+        ...current,
+        panes,
+        activePaneId: targetPaneId,
+      };
     });
-    focusPane(targetPaneId);
+    return removeSourcePane;
   }
 
   return {
@@ -273,8 +292,14 @@ export const workbenchPaneBunja = bunja(() => {
     tabId: string,
     targetTabId: string | undefined,
     position: TabDropPosition,
-  ) {
-    workbench.moveTab(sourcePaneId, tabId, paneId, targetTabId, position);
+  ): boolean {
+    return workbench.moveTab(
+      sourcePaneId,
+      tabId,
+      paneId,
+      targetTabId,
+      position,
+    );
   }
 
   return {
