@@ -108,7 +108,6 @@ export function WorkbenchTabItem(
               tabId: currentTabId,
             }),
           );
-          event.dataTransfer.setData("text/plain", label);
           onDragStart();
         }}
         onDragEnd={onDragEnd}

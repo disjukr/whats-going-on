@@ -815,6 +815,16 @@ button.rail-machine.active:hover {
   overflow: visible;
 }
 
+.workbench-pane-body::before {
+  content: "";
+  position: absolute;
+  z-index: 4;
+  border: 2px solid #4f8cff;
+  background: rgb(79 140 255 / 16%);
+  opacity: 0;
+  pointer-events: none;
+}
+
 .workbench-pane-body::after {
   top: -3px;
   right: 0;
@@ -829,6 +839,38 @@ button.rail-machine.active:hover {
 
 .workbench-pane.active .workbench-pane-body::after {
   border-color: #7f9abf;
+}
+
+.workbench-pane-body.tab-split-left::before {
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 50%;
+  opacity: 1;
+}
+
+.workbench-pane-body.tab-split-right::before {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 50%;
+  opacity: 1;
+}
+
+.workbench-pane-body.tab-split-top::before {
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 50%;
+  opacity: 1;
+}
+
+.workbench-pane-body.tab-split-bottom::before {
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 50%;
+  opacity: 1;
 }
 
 .workbench-tab-page {

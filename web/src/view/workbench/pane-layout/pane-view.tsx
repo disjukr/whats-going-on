@@ -20,6 +20,7 @@ import { WorkbenchToolContent } from "../tool/index.tsx";
 import {
   hasWorkbenchTabDragData,
   readWorkbenchTabDragData,
+  type TabSplitDropSide,
   type WorkbenchTabDragData,
   type WorkbenchTabDropTarget,
 } from "./tab-drag.ts";
@@ -42,8 +43,14 @@ export function WorkbenchPaneView(
   const [newTabMenuOpen, setNewTabMenuOpen] = useState(false);
   const [draggingTabId, setDraggingTabId] = useState<string>();
   const [tabDropTarget, setTabDropTarget] = useState<WorkbenchTabDropTarget>();
+  const [tabSplitDropSide, setTabSplitDropSide] = useState<
+    TabSplitDropSide | undefined
+  >();
   const newTabMenuRef = useRef<HTMLDivElement>(null);
   const canClosePane = paneCount > 1;
+  const hasTabDragState = draggingTabId !== undefined ||
+    tabDropTarget !== undefined ||
+    tabSplitDropSide !== undefined;
 
   useEffect(() => {
     if (!newTabMenuOpen) return;
@@ -69,11 +76,12 @@ export function WorkbenchPaneView(
   }, [newTabMenuOpen]);
 
   useEffect(() => {
-    if (!draggingTabId) return;
+    if (!hasTabDragState) return;
 
     function clearTabDragState() {
       setDraggingTabId(undefined);
       setTabDropTarget(undefined);
+      setTabSplitDropSide(undefined);
     }
 
     globalThis.addEventListener("dragend", clearTabDragState, true);
@@ -82,7 +90,7 @@ export function WorkbenchPaneView(
       globalThis.removeEventListener("dragend", clearTabDragState, true);
       globalThis.removeEventListener("drop", clearTabDragState, true);
     };
-  }, [draggingTabId]);
+  }, [hasTabDragState]);
 
   function splitPane(direction: "horizontal" | "vertical") {
     const newPaneId = paneState.addPane();
@@ -125,6 +133,35 @@ export function WorkbenchPaneView(
     }
     setDraggingTabId(undefined);
     setTabDropTarget(undefined);
+    setTabSplitDropSide(undefined);
+  }
+
+  function splitDroppedTab(
+    dragData: WorkbenchTabDragData,
+    side: TabSplitDropSide,
+  ) {
+    const result = paneState.moveTabToNewPane(
+      dragData.paneId,
+      dragData.tabId,
+    );
+    if (!result) {
+      setDraggingTabId(undefined);
+      setTabDropTarget(undefined);
+      setTabSplitDropSide(undefined);
+      return;
+    }
+
+    const direction = side === "left" || side === "right"
+      ? "horizontal"
+      : "vertical";
+    const position = side === "left" || side === "top" ? "before" : "after";
+    split(nodeId, direction, result.newPaneId, position);
+    if (result.sourcePaneRemoved) {
+      removeLayoutPane(dragData.nodeId);
+    }
+    setDraggingTabId(undefined);
+    setTabDropTarget(undefined);
+    setTabSplitDropSide(undefined);
   }
 
   if (!pane) return null;
@@ -138,6 +175,7 @@ export function WorkbenchPaneView(
       return;
     }
     event.preventDefault();
+    event.stopPropagation();
     event.dataTransfer.dropEffect = "move";
     setTabDropTarget({ position: "end" });
   }
@@ -152,6 +190,7 @@ export function WorkbenchPaneView(
     const dragData = readWorkbenchTabDragData(event);
     if (!dragData) return;
     event.preventDefault();
+    event.stopPropagation();
     moveDroppedTab(dragData, undefined, "end");
   }
 
@@ -165,6 +204,38 @@ export function WorkbenchPaneView(
     }
     setTabDropTarget(undefined);
   }
+
+  function handlePaneBodyDragOver(event: React.DragEvent<HTMLDivElement>) {
+    if (!hasWorkbenchTabDragData(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    setTabSplitDropSide(tabSplitSideFromEvent(event));
+  }
+
+  function handlePaneBodyDrop(event: React.DragEvent<HTMLDivElement>) {
+    const dragData = readWorkbenchTabDragData(event);
+    if (!dragData) return;
+    event.preventDefault();
+    event.stopPropagation();
+    splitDroppedTab(dragData, tabSplitSideFromEvent(event));
+  }
+
+  function handlePaneBodyDragLeave(event: React.DragEvent<HTMLDivElement>) {
+    const relatedTarget = event.relatedTarget;
+    if (
+      relatedTarget instanceof Node &&
+      event.currentTarget.contains(relatedTarget)
+    ) {
+      return;
+    }
+    setTabSplitDropSide(undefined);
+  }
+
+  const paneBodyClassName = [
+    "workbench-pane-body",
+    tabSplitDropSide ? `tab-split-${tabSplitDropSide}` : "",
+  ].filter(Boolean).join(" ");
 
   return (
     <section
@@ -267,7 +338,12 @@ export function WorkbenchPaneView(
           </button>
         </div>
       </header>
-      <div className="workbench-pane-body">
+      <div
+        className={paneBodyClassName}
+        onDragOver={handlePaneBodyDragOver}
+        onDrop={handlePaneBodyDrop}
+        onDragLeave={handlePaneBodyDragLeave}
+      >
         {pane.tabs.map((tab) => (
           <WorkbenchTabIdContext key={tab.id} value={tab.id}>
             <section
@@ -281,4 +357,20 @@ export function WorkbenchPaneView(
       </div>
     </section>
   );
+}
+
+function tabSplitSideFromEvent(
+  event: React.DragEvent<HTMLElement>,
+): TabSplitDropSide {
+  const rect = event.currentTarget.getBoundingClientRect();
+  const left = event.clientX - rect.left;
+  const right = rect.right - event.clientX;
+  const top = event.clientY - rect.top;
+  const bottom = rect.bottom - event.clientY;
+  const nearest = Math.min(left, right, top, bottom);
+
+  if (nearest === left) return "left";
+  if (nearest === right) return "right";
+  if (nearest === top) return "top";
+  return "bottom";
 }

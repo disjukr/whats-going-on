@@ -22,6 +22,11 @@ export interface WorkbenchPane {
   activeTabId: string;
 }
 
+export interface MoveTabToNewPaneResult {
+  newPaneId: string;
+  sourcePaneRemoved: boolean;
+}
+
 interface WorkbenchState {
   layout: LayoutState;
   activeTool: WorkbenchTool;
@@ -247,6 +252,57 @@ export const workbenchBunja = bunja(() => {
     return removeSourcePane;
   }
 
+  function moveTabToNewPane(
+    sourcePaneId: string,
+    tabId: string,
+    targetPaneId: string,
+  ): MoveTabToNewPaneResult | undefined {
+    const currentState = store.get(stateAtom);
+    const currentSourcePane = currentState.panes.find((pane) =>
+      pane.id === sourcePaneId
+    );
+    const currentMovingTab = currentSourcePane?.tabs.find((tab) =>
+      tab.id === tabId
+    );
+    if (!currentSourcePane || !currentMovingTab) return undefined;
+    if (sourcePaneId === targetPaneId && currentSourcePane.tabs.length <= 1) {
+      return undefined;
+    }
+
+    const newPaneId = `pane-${crypto.randomUUID()}`;
+    const sourcePaneRemoved = currentSourcePane.tabs.length <= 1;
+    store.set(stateAtom, (current) => {
+      const sourcePane = current.panes.find((pane) => pane.id === sourcePaneId);
+      const movingTab = sourcePane?.tabs.find((tab) => tab.id === tabId);
+      if (!sourcePane || !movingTab) return current;
+
+      const newPane: WorkbenchPane = {
+        id: newPaneId,
+        tabs: [movingTab],
+        activeTabId: movingTab.id,
+      };
+      const panes = current.panes.flatMap((pane) => {
+        if (pane.id !== sourcePaneId) return [pane];
+
+        const tabs = pane.tabs.filter((tab) => tab.id !== tabId);
+        if (tabs.length === 0) return [];
+
+        const activeTabId = pane.activeTabId === tabId
+          ? tabs[0].id
+          : pane.activeTabId;
+        return [{ ...pane, tabs, activeTabId }];
+      });
+
+      return {
+        ...current,
+        activePaneId: newPaneId,
+        panes: [...panes, newPane],
+      };
+    });
+
+    return { newPaneId, sourcePaneRemoved };
+  }
+
   return {
     layoutAtom,
     activeToolAtom,
@@ -261,6 +317,7 @@ export const workbenchBunja = bunja(() => {
     selectTab,
     closeTab,
     moveTab,
+    moveTabToNewPane,
   };
 });
 
@@ -316,6 +373,13 @@ export const workbenchPaneBunja = bunja(() => {
     );
   }
 
+  function moveTabToNewPane(
+    sourcePaneId: string,
+    tabId: string,
+  ): MoveTabToNewPaneResult | undefined {
+    return workbench.moveTabToNewPane(sourcePaneId, tabId, paneId);
+  }
+
   return {
     paneId,
     paneAtom,
@@ -328,6 +392,7 @@ export const workbenchPaneBunja = bunja(() => {
     selectTab,
     closeTab,
     moveTab,
+    moveTabToNewPane,
   };
 });
 
