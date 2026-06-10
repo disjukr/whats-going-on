@@ -1,4 +1,4 @@
-import { formatSize } from "../../../../state/explorer.ts";
+import { formatSize } from "../../../../../../state/explorer.ts";
 import type { FilePreview } from "./types.ts";
 
 export function decodeFilePreview(bytes: Uint8Array): FilePreview {

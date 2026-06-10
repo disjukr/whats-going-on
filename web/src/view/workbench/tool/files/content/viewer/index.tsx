@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { FileText, Loader2 } from "lucide-react";
-import { FsEntry, readFile } from "../../../../protocol/rpc.ts";
-import { displayName, formatSize } from "../../../../state/explorer.ts";
-import type { Machine } from "../../../../state/machines.ts";
+import { FsEntry, readFile } from "../../../../../../protocol/rpc.ts";
+import { displayName, formatSize } from "../../../../../../state/explorer.ts";
+import type { Machine } from "../../../../../../state/machines.ts";
 import { decodeFilePreview } from "./file-preview.ts";
+import { HexViewerContent } from "./hex/index.tsx";
+import { TextViewerContent } from "./text/index.tsx";
 import type { FileLoadState } from "./types.ts";
 
 interface FileViewerProps {
@@ -67,13 +69,9 @@ export function FileViewer({ machine, file }: FileViewerProps) {
           </div>
         )
         : (
-          <pre
-            className={state.preview.kind === "binary"
-              ? "file-content binary"
-              : "file-content"}
-          >
-            {state.preview.text}
-          </pre>
+          state.preview.kind === "binary"
+            ? <HexViewerContent text={state.preview.text} />
+            : <TextViewerContent text={state.preview.text} />
         )}
     </section>
   );

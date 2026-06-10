@@ -1,6 +1,6 @@
 import React, { FormEvent, useEffect, useRef, useState } from "react";
 import { ChevronRight } from "lucide-react";
-import { pathCrumbs } from "../../../../state/explorer.ts";
+import { pathCrumbs } from "../../../../../state/explorer.ts";
 
 interface PathCrumbsProps {
   path?: string;

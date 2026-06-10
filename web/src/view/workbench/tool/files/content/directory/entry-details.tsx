@@ -1,11 +1,11 @@
 import { X } from "lucide-react";
-import { FsEntry } from "../../../../protocol/rpc.ts";
+import { FsEntry } from "../../../../../../protocol/rpc.ts";
 import {
   displayName,
   formatDate,
   formatSize,
   kindLabel,
-} from "../../../../state/explorer.ts";
+} from "../../../../../../state/explorer.ts";
 
 interface InspectorProps {
   entry?: FsEntry;

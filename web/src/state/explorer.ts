@@ -367,6 +367,7 @@ export const explorerBunja = bunja(() => {
   const directory = bunja.use(explorerDirectoryBunja);
   const refresh = bunja.use(explorerRefreshBunja);
 
+  const fileOpenPromptAtom = atom<FsEntry | undefined>(undefined);
   const rowsAtom = atom((get) =>
     get(navigation.currentPathAtom)
       ? get(directory.directoryRowsAtom)
@@ -382,6 +383,7 @@ export const explorerBunja = bunja(() => {
   return {
     currentPathAtom: navigation.currentPathAtom,
     displayPathAtom: navigation.displayPathAtom,
+    fileOpenPromptAtom,
     historyAtom: navigation.historyAtom,
     openedFileAtom: navigation.openedFileAtom,
     selectedPathAtom: navigation.selectedPathAtom,

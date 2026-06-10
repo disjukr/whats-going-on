@@ -1,5 +1,5 @@
 import { FileQuestion, FileText, Folder, HardDrive, Link2 } from "lucide-react";
-import { FsEntry, FsEntryKind } from "../../../../protocol/rpc.ts";
+import { FsEntry, FsEntryKind } from "../../../../../../protocol/rpc.ts";
 
 interface EntryIconProps {
   entry: FsEntry;

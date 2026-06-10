@@ -1,11 +1,11 @@
 import React from "react";
-import { FsEntry } from "../../../../protocol/rpc.ts";
+import { FsEntry } from "../../../../../../protocol/rpc.ts";
 import {
   displayName,
   formatDate,
   formatSize,
   kindLabel,
-} from "../../../../state/explorer.ts";
+} from "../../../../../../state/explorer.ts";
 import { EntryIcon } from "./entry-icon.tsx";
 
 interface FileTableProps {

@@ -9,6 +9,6 @@ export function WorkbenchToolContent() {
 
   if (!tab) return null;
   if (tab.tool === "files") {
-    return <FilesTool paneScopeId={tab.id} />;
+    return <FilesTool />;
   }
 }

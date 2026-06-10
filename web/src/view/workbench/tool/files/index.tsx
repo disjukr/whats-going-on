@@ -1,50 +1,51 @@
 import React, { useEffect, useRef, useState } from "react";
-import { useAtomValue } from "jotai";
+import { useAtomValue, useSetAtom } from "jotai";
 import { useBunja } from "bunja/react";
-import { ArrowLeft, ArrowUp, HardDrive, Info, KeyRound } from "lucide-react";
+import { HardDrive, Info, KeyRound } from "lucide-react";
 import { FsEntry, FsEntryKind } from "../../../../protocol/rpc.ts";
 import { connectionBunja } from "../../../../state/connection.ts";
 import {
   explorerBunja,
   ExplorerPaneScope,
-  formatSize,
 } from "../../../../state/explorer.ts";
 import { machineModalBunja } from "../../../../state/machine-modal.ts";
 import { machineStoreBunja } from "../../../../state/machine-store.ts";
-import { EntryPropertiesModal, Inspector } from "./entry-details.tsx";
-import { FileOpenPrompt } from "./file-open-prompt.tsx";
-import { FileTable } from "./file-table.tsx";
-import { FileViewer } from "./file-viewer.tsx";
-import { PathCrumbs } from "./path-crumbs.tsx";
-import type { EntryMenuState } from "./types.ts";
+import { workbenchTabBunja } from "../../../../state/workbench.ts";
+import {
+  type FilesActions,
+  FilesActionsContext,
+  FilesExplorerContext,
+} from "./context.tsx";
+import { FilesContent } from "./content/index.tsx";
+import { EntryPropertiesModal } from "./content/directory/index.tsx";
+import { FilesFooter } from "./footer/index.tsx";
+import { FilesNavbar } from "./navbar/index.tsx";
 
 const inlineFileOpenLimitBytes = 1024 * 1024;
 
-interface FilesToolProps {
-  paneScopeId: string;
+interface EntryMenuState {
+  entry: FsEntry;
+  x: number;
+  y: number;
 }
 
-export function FilesTool({ paneScopeId }: FilesToolProps) {
+export function FilesTool() {
   const connectionState = useBunja(connectionBunja);
   const machineModal = useBunja(machineModalBunja);
   const machineStore = useBunja(machineStoreBunja);
   const machine = useAtomValue(machineStore.selectedAtom);
   const isPaired = useAtomValue(machineStore.selectedIsPairedAtom);
   const connectionEpoch = useAtomValue(connectionState.connectionEpochAtom);
+  const tabState = useBunja(workbenchTabBunja);
   const explorer = useBunja(explorerBunja, [
-    ExplorerPaneScope.bind(paneScopeId),
+    ExplorerPaneScope.bind(tabState.tabId),
   ]);
-  const currentPath = useAtomValue(explorer.currentPathAtom);
-  const displayPath = useAtomValue(explorer.displayPathAtom);
-  const history = useAtomValue(explorer.historyAtom);
+  const fileOpenPrompt = useAtomValue(explorer.fileOpenPromptAtom);
+  const setFileOpenPrompt = useSetAtom(explorer.fileOpenPromptAtom);
   const openedFile = useAtomValue(explorer.openedFileAtom);
-  const selectedPath = useAtomValue(explorer.selectedPathAtom);
-  const visibleRows = useAtomValue(explorer.visibleRowsAtom);
-  const selectedEntry = useAtomValue(explorer.selectedEntryAtom);
   const lastConnectionEpochRef = useRef(connectionEpoch);
   const [entryMenu, setEntryMenu] = useState<EntryMenuState>();
   const [propertiesEntry, setPropertiesEntry] = useState<FsEntry>();
-  const [fileOpenPrompt, setFileOpenPrompt] = useState<FsEntry>();
 
   useEffect(() => {
     if (lastConnectionEpochRef.current === connectionEpoch) return;
@@ -158,6 +159,17 @@ export function FilesTool({ paneScopeId }: FilesToolProps) {
     setPropertiesEntry(entry);
   }
 
+  const actions: FilesActions = {
+    cancelFileOpen: () => setFileOpenPrompt(undefined),
+    confirmFileOpen,
+    goBack: goBackFromToolbar,
+    goUp: goUpFromToolbar,
+    navigate: navigateFromToolbar,
+    openEntry: openTableEntry,
+    openEntryMenu,
+    selectEntry,
+  };
+
   if (!machine) {
     return (
       <section className="empty-workspace">
@@ -185,65 +197,15 @@ export function FilesTool({ paneScopeId }: FilesToolProps) {
 
   return (
     <section className="explorer">
-      <div className="path-toolbar">
-        <button
-          type="button"
-          onClick={goBackFromToolbar}
-          disabled={history.length === 0 && !fileOpenPrompt}
-          title="Back"
-          aria-label="Back"
-          className="icon-button"
-        >
-          <ArrowLeft size={16} />
-        </button>
-        <button
-          type="button"
-          onClick={goUpFromToolbar}
-          disabled={!currentPath}
-          title="Up"
-          aria-label="Up"
-          className="icon-button"
-        >
-          <ArrowUp size={16} />
-        </button>
-        <PathCrumbs
-          path={fileOpenPrompt?.path ?? displayPath}
-          onNavigate={navigateFromToolbar}
-        />
-      </div>
+      <FilesExplorerContext value={explorer}>
+        <FilesActionsContext value={actions}>
+          <FilesNavbar />
 
-      {fileOpenPrompt
-        ? (
-          <FileOpenPrompt
-            file={fileOpenPrompt}
-            onCancel={() => setFileOpenPrompt(undefined)}
-            onConfirm={confirmFileOpen}
-          />
-        )
-        : openedFile
-        ? <FileViewer machine={machine} file={openedFile} />
-        : (
-          <div className="browser-layout">
-            <FileTable
-              rows={visibleRows}
-              selectedPath={selectedPath}
-              onSelect={selectEntry}
-              onOpen={openTableEntry}
-              onContextMenu={openEntryMenu}
-            />
-            <Inspector entry={selectedEntry} currentPath={currentPath} />
-          </div>
-        )}
+          <FilesContent />
 
-      <div className="explorer-footer">
-        <span>
-          {fileOpenPrompt
-            ? formatSize(fileOpenPrompt.size)
-            : openedFile
-            ? formatSize(openedFile.size)
-            : `${visibleRows.length} items`}
-        </span>
-      </div>
+          <FilesFooter />
+        </FilesActionsContext>
+      </FilesExplorerContext>
 
       {entryMenu
         ? (

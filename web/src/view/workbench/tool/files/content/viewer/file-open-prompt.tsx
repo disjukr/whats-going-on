@@ -1,6 +1,6 @@
 import { FileText } from "lucide-react";
-import { FsEntry } from "../../../../protocol/rpc.ts";
-import { displayName, formatSize } from "../../../../state/explorer.ts";
+import { FsEntry } from "../../../../../../protocol/rpc.ts";
+import { displayName, formatSize } from "../../../../../../state/explorer.ts";
 
 interface FileOpenPromptProps {
   file: FsEntry;
