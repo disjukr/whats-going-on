@@ -414,6 +414,32 @@ function explorerNavigationStorageKey(
   return `wgo.explorer.navigation.${machineId ?? "none"}.${paneScopeId}.v1`;
 }
 
+export function copyExplorerNavigationState(
+  machineId: string | undefined,
+  sourcePaneScopeId: string,
+  targetPaneScopeId: string,
+) {
+  try {
+    const storage = globalThis.localStorage;
+    const sourceKey = explorerNavigationStorageKey(
+      machineId,
+      sourcePaneScopeId,
+    );
+    const targetKey = explorerNavigationStorageKey(
+      machineId,
+      targetPaneScopeId,
+    );
+    const sourceValue = storage.getItem(sourceKey);
+    if (sourceValue === null) {
+      storage.removeItem(targetKey);
+      return;
+    }
+    storage.setItem(targetKey, sourceValue);
+  } catch {
+    // Keep pane splitting usable even if persisted tab state cannot be copied.
+  }
+}
+
 function resolveSetStateAction<Value>(
   action: SetStateAction<Value>,
   current: Value,

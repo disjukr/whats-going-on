@@ -4,6 +4,7 @@ import { createScopeFromContext } from "bunja/react";
 import { atom } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import { createLayout, type LayoutState } from "panecake";
+import { copyExplorerNavigationState } from "./explorer.ts";
 import { JotaiStoreScope } from "./jotai-store.ts";
 import { MachineIdScope } from "./machine-id.tsx";
 
@@ -97,13 +98,22 @@ export const workbenchBunja = bunja(() => {
     );
   }
 
-  function addPane(): string {
+  function addPane(sourcePaneId?: string): string {
+    const sourcePane = sourcePaneId === undefined
+      ? undefined
+      : store.get(stateAtom).panes.find((pane) => pane.id === sourcePaneId);
+    const sourceTab = sourcePane?.tabs.find((tab) =>
+      tab.id === sourcePane.activeTabId
+    ) ?? sourcePane?.tabs[0];
+    const tab = sourceTab === undefined
+      ? createFilesTab()
+      : cloneWorkbenchTab(sourceTab);
     const pane: WorkbenchPane = {
       id: `pane-${crypto.randomUUID()}`,
-      tabs: [createFilesTab()],
-      activeTabId: "",
+      tabs: [tab],
+      activeTabId: tab.id,
     };
-    pane.activeTabId = pane.tabs[0].id;
+    if (sourceTab) copyTabState(machineId, sourceTab, tab);
     store.set(stateAtom, (current) => ({
       ...current,
       activePaneId: pane.id,
@@ -267,6 +277,10 @@ export const workbenchPaneBunja = bunja(() => {
   const paneCountAtom = atom((get) => get(workbench.panesAtom).length);
   const activeAtom = atom((get) => get(workbench.activePaneIdAtom) === paneId);
 
+  function addPane(): string {
+    return workbench.addPane(paneId);
+  }
+
   function addFilesTab() {
     workbench.addFilesTab(paneId);
   }
@@ -307,7 +321,7 @@ export const workbenchPaneBunja = bunja(() => {
     paneAtom,
     paneCountAtom,
     activeAtom,
-    addPane: workbench.addPane,
+    addPane,
     addFilesTab,
     removePane,
     focusPane,
@@ -400,4 +414,21 @@ function createFilesTab(): WorkbenchTab {
     title: "Files",
     tool: "files",
   };
+}
+
+function cloneWorkbenchTab(tab: WorkbenchTab): WorkbenchTab {
+  return {
+    ...tab,
+    id: `${tab.tool}-${crypto.randomUUID()}`,
+  };
+}
+
+function copyTabState(
+  machineId: string | undefined,
+  sourceTab: WorkbenchTab,
+  targetTab: WorkbenchTab,
+) {
+  if (sourceTab.tool === "files" && targetTab.tool === "files") {
+    copyExplorerNavigationState(machineId, sourceTab.id, targetTab.id);
+  }
 }
