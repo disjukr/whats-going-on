@@ -1,21 +1,29 @@
 import { useContext, useEffect, useState } from "react";
 import { useBunja } from "bunja/react";
 import { useAtomValue } from "jotai";
-import { readFile } from "../../../../../../../protocol/rpc.ts";
-import type { FsEntry } from "../../../../../../../protocol/rpc.ts";
-import { FilesActionsContext, requireFilesActions } from "../../../context.tsx";
-import { FileOpenPrompt } from "../file-open-prompt.tsx";
-import { decodeHexFilePreview } from "../file-preview.ts";
-import { fileViewerBunja } from "../index.tsx";
-import type { FileReadState } from "../types.ts";
+import { readFile } from "../../../../../../../../protocol/rpc.ts";
+import type { FsEntry } from "../../../../../../../../protocol/rpc.ts";
+import { formatSize } from "../../../../../../../../state/explorer.ts";
+import {
+  FilesActionsContext,
+  requireFilesActions,
+} from "../../../../context.tsx";
+import { BigFileWarning } from "../../big-file-warning.tsx";
+import { fileViewerBunja } from "../../state.tsx";
+import type { FileViewerImpl } from "../index.ts";
 
 const inlineOpenLimitBytes = 1024 * 1024;
+
+type FileReadState =
+  | { phase: "loading" }
+  | { phase: "ready"; text: string }
+  | { phase: "error"; message: string };
 
 export function HexFileViewer() {
   const actions = requireFilesActions(useContext(FilesActionsContext));
   const viewer = useBunja(fileViewerBunja);
   const fsEntry = viewer.fsEntry;
-  const sniffState = useAtomValue(viewer.stateAtom);
+  const viewerState = useAtomValue(viewer.stateAtom);
   const machine = useAtomValue(viewer.machineAtom);
   const requiresConfirmation = fsEntry.size === undefined ||
     fsEntry.size > inlineOpenLimitBytes;
@@ -27,14 +35,14 @@ export function HexFileViewer() {
   const [state, setState] = useState<FileReadState>({ phase: "loading" });
 
   useEffect(() => {
-    if (!confirmed || !machine || sniffState.phase !== "ready") return;
+    if (!confirmed || !machine || viewerState.phase !== "ready") return;
 
     let cancelled = false;
     setState({ phase: "loading" });
     void (async () => {
       try {
-        const bytes = hasCompleteInitialBytes(fsEntry, sniffState.initialBytes)
-          ? sniffState.initialBytes
+        const bytes = hasCompleteInitialBytes(fsEntry, viewerState.initialBytes)
+          ? viewerState.initialBytes
           : await readFile(machine, fsEntry.path);
         if (cancelled) return;
         setState({
@@ -53,7 +61,7 @@ export function HexFileViewer() {
     return () => {
       cancelled = true;
     };
-  }, [confirmed, fsEntry, fsEntry.path, machine, sniffState]);
+  }, [confirmed, fsEntry, fsEntry.path, machine, viewerState]);
 
   if (!machine) {
     return (
@@ -63,14 +71,14 @@ export function HexFileViewer() {
     );
   }
 
-  if (sniffState.phase !== "ready") return null;
+  if (viewerState.phase !== "ready") return null;
 
   if (!confirmed) {
     return (
-      <FileOpenPrompt
+      <BigFileWarning
         onCancel={actions.goBack}
         onConfirm={() => setConfirmedFsEntryPath(fsEntry.path)}
-        viewerLabel="hex viewer"
+        viewerName={hexFileViewerImpl.viewerName}
       />
     );
   }
@@ -100,3 +108,32 @@ function hasCompleteInitialBytes(
 ): boolean {
   return fsEntry.size !== undefined && fsEntry.size <= initialBytes.byteLength;
 }
+
+function decodeHexFilePreview(bytes: Uint8Array): string {
+  const previewLength = Math.min(bytes.length, 4096);
+  const lines: string[] = [];
+  for (let offset = 0; offset < previewLength; offset += 16) {
+    const chunk = bytes.subarray(offset, Math.min(offset + 16, previewLength));
+    const hex = Array.from(chunk)
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join(" ")
+      .padEnd(47, " ");
+    const ascii = Array.from(chunk)
+      .map((byte) =>
+        byte >= 32 && byte <= 126 ? String.fromCharCode(byte) : "."
+      )
+      .join("");
+    lines.push(`${offset.toString(16).padStart(8, "0")}  ${hex}  |${ascii}|`);
+  }
+  if (bytes.length > previewLength) {
+    lines.push(`... ${formatSize(bytes.length - previewLength)} more`);
+  }
+  return lines.join("\n");
+}
+
+export const hexFileViewerImpl = {
+  id: "hex",
+  label: "Hex",
+  viewerName: "hex viewer",
+  Component: HexFileViewer,
+} as const satisfies FileViewerImpl;

@@ -18,7 +18,6 @@ import {
 } from "./context.tsx";
 import { FilesContent } from "./content/index.tsx";
 import { EntryPropertiesModal } from "./content/directory/index.tsx";
-import { FilesFooter } from "./footer/index.tsx";
 import { FilesNavbar } from "./navbar/index.tsx";
 
 interface EntryMenuState {
@@ -171,8 +170,6 @@ export function FilesTool() {
           <FilesNavbar />
 
           <FilesContent />
-
-          <FilesFooter />
         </FilesActionsContext>
       </FilesExplorerContext>
 

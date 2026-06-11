@@ -1,21 +1,28 @@
 import { useContext, useEffect, useState } from "react";
 import { useBunja } from "bunja/react";
 import { useAtomValue } from "jotai";
-import { readFile } from "../../../../../../../protocol/rpc.ts";
-import type { FsEntry } from "../../../../../../../protocol/rpc.ts";
-import { FilesActionsContext, requireFilesActions } from "../../../context.tsx";
-import { FileOpenPrompt } from "../file-open-prompt.tsx";
-import { decodeTextFile } from "../file-preview.ts";
-import { fileViewerBunja } from "../index.tsx";
-import type { FileReadState } from "../types.ts";
+import { readFile } from "../../../../../../../../protocol/rpc.ts";
+import type { FsEntry } from "../../../../../../../../protocol/rpc.ts";
+import {
+  FilesActionsContext,
+  requireFilesActions,
+} from "../../../../context.tsx";
+import { BigFileWarning } from "../../big-file-warning.tsx";
+import { fileViewerBunja } from "../../state.tsx";
+import type { FileViewerImpl } from "../index.ts";
 
 const inlineOpenLimitBytes = 1024 * 1024;
+
+type FileReadState =
+  | { phase: "loading" }
+  | { phase: "ready"; text: string }
+  | { phase: "error"; message: string };
 
 export function TextFileViewer() {
   const actions = requireFilesActions(useContext(FilesActionsContext));
   const viewer = useBunja(fileViewerBunja);
   const fsEntry = viewer.fsEntry;
-  const sniffState = useAtomValue(viewer.stateAtom);
+  const viewerState = useAtomValue(viewer.stateAtom);
   const machine = useAtomValue(viewer.machineAtom);
   const requiresConfirmation = fsEntry.size === undefined ||
     fsEntry.size > inlineOpenLimitBytes;
@@ -27,14 +34,14 @@ export function TextFileViewer() {
   const [state, setState] = useState<FileReadState>({ phase: "loading" });
 
   useEffect(() => {
-    if (!confirmed || !machine || sniffState.phase !== "ready") return;
+    if (!confirmed || !machine || viewerState.phase !== "ready") return;
 
     let cancelled = false;
     setState({ phase: "loading" });
     void (async () => {
       try {
-        const bytes = hasCompleteInitialBytes(fsEntry, sniffState.initialBytes)
-          ? sniffState.initialBytes
+        const bytes = hasCompleteInitialBytes(fsEntry, viewerState.initialBytes)
+          ? viewerState.initialBytes
           : await readFile(machine, fsEntry.path);
         if (cancelled) return;
         setState({
@@ -53,7 +60,7 @@ export function TextFileViewer() {
     return () => {
       cancelled = true;
     };
-  }, [confirmed, fsEntry, fsEntry.path, machine, sniffState]);
+  }, [confirmed, fsEntry, fsEntry.path, machine, viewerState]);
 
   if (!machine) {
     return (
@@ -63,14 +70,14 @@ export function TextFileViewer() {
     );
   }
 
-  if (sniffState.phase !== "ready") return null;
+  if (viewerState.phase !== "ready") return null;
 
   if (!confirmed) {
     return (
-      <FileOpenPrompt
+      <BigFileWarning
         onCancel={actions.goBack}
         onConfirm={() => setConfirmedFsEntryPath(fsEntry.path)}
-        viewerLabel="text viewer"
+        viewerName={textFileViewerImpl.viewerName}
       />
     );
   }
@@ -100,3 +107,14 @@ function hasCompleteInitialBytes(
 ): boolean {
   return fsEntry.size !== undefined && fsEntry.size <= initialBytes.byteLength;
 }
+
+function decodeTextFile(bytes: Uint8Array): string {
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+}
+
+export const textFileViewerImpl = {
+  id: "text",
+  label: "Text",
+  viewerName: "text viewer",
+  Component: TextFileViewer,
+} as const satisfies FileViewerImpl;

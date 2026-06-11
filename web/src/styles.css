@@ -906,7 +906,7 @@ button.rail-machine.active:hover {
 
 .explorer {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   width: 100%;
   height: 100%;
   min-height: 0;
@@ -991,6 +991,51 @@ button.rail-machine.active:hover {
   color: #667085;
   padding: 0 16px;
   font-size: 12px;
+}
+
+.file-viewer-footer {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.file-viewer-impl-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: #667085;
+}
+
+.file-viewer-impl-select {
+  width: 86px;
+  height: 24px;
+  min-height: 24px;
+  border: 1px solid #cfd7e5;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #344054;
+  font: inherit;
+  line-height: 22px;
+  padding: 0 6px;
+}
+
+.file-viewer-impl-select:disabled {
+  color: #98a2b3;
+  background: #f4f6fa;
+}
+
+.file-viewer-footer-size {
+  flex: 0 0 auto;
+}
+
+.directory-content {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .browser-layout {
@@ -1132,7 +1177,7 @@ button.rail-machine.active:hover {
 
 .file-viewer {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -1222,7 +1267,7 @@ button.rail-machine.active:hover {
   overflow-wrap: normal;
 }
 
-.file-open-prompt {
+.big-file-warning {
   display: grid;
   place-items: center;
   width: 100%;
@@ -1234,7 +1279,7 @@ button.rail-machine.active:hover {
   padding: 24px;
 }
 
-.file-open-prompt-panel {
+.big-file-warning-panel {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 14px;
@@ -1245,7 +1290,7 @@ button.rail-machine.active:hover {
   padding: 16px;
 }
 
-.file-open-prompt-icon {
+.big-file-warning-icon {
   display: grid;
   place-items: center;
   width: 42px;
@@ -1255,13 +1300,13 @@ button.rail-machine.active:hover {
   color: #4f8cff;
 }
 
-.file-open-prompt-copy {
+.big-file-warning-copy {
   display: grid;
   gap: 5px;
   min-width: 0;
 }
 
-.file-open-prompt-copy h2 {
+.big-file-warning-copy h2 {
   min-width: 0;
   margin: 0;
   overflow: hidden;
@@ -1272,7 +1317,7 @@ button.rail-machine.active:hover {
   white-space: nowrap;
 }
 
-.file-open-prompt-copy p {
+.big-file-warning-copy p {
   min-width: 0;
   margin: 0;
   overflow-wrap: anywhere;
@@ -1280,12 +1325,12 @@ button.rail-machine.active:hover {
   font-size: 12px;
 }
 
-.file-open-prompt-copy strong {
+.big-file-warning-copy strong {
   color: #303642;
   font-size: 13px;
 }
 
-.file-open-prompt-actions {
+.big-file-warning-actions {
   grid-column: 1 / -1;
   display: flex;
   justify-content: flex-end;

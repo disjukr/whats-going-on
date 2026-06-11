@@ -18,17 +18,31 @@ export function DirectoryContent() {
   const selectedPath = useAtomValue(explorer.selectedPathAtom);
 
   return (
-    <div className="browser-layout">
-      <FileTable
-        rows={rows}
-        selectedPath={selectedPath}
-        onSelect={actions.selectEntry}
-        onOpen={actions.openEntry}
-        onContextMenu={actions.openEntryMenu}
-      />
-      <Inspector entry={selectedEntry} currentPath={currentPath} />
+    <div className="directory-content">
+      <div className="browser-layout">
+        <FileTable
+          rows={rows}
+          selectedPath={selectedPath}
+          onSelect={actions.selectEntry}
+          onOpen={actions.openEntry}
+          onContextMenu={actions.openEntryMenu}
+        />
+        <Inspector entry={selectedEntry} currentPath={currentPath} />
+      </div>
+      <DirectoryFooter />
     </div>
   );
 }
 
 export { EntryPropertiesModal } from "./entry-details.tsx";
+
+function DirectoryFooter() {
+  const explorer = requireFilesExplorer(useContext(FilesExplorerContext));
+  const rows = useAtomValue(explorer.visibleRowsAtom);
+
+  return (
+    <div className="explorer-footer">
+      <span>{rows.length} items</span>
+    </div>
+  );
+}

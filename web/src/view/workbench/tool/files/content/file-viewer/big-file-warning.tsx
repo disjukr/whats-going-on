@@ -1,16 +1,16 @@
 import { useBunja } from "bunja/react";
 import { FileText } from "lucide-react";
 import { displayName, formatSize } from "../../../../../../state/explorer.ts";
-import { fileViewerBunja } from "./index.tsx";
+import { fileViewerBunja } from "./state.tsx";
 
-interface FileOpenPromptProps {
+interface BigFileWarningProps {
   onCancel: () => void;
   onConfirm: () => void;
-  viewerLabel: string;
+  viewerName: string;
 }
 
-export function FileOpenPrompt(
-  { onCancel, onConfirm, viewerLabel }: FileOpenPromptProps,
+export function BigFileWarning(
+  { onCancel, onConfirm, viewerName }: BigFileWarningProps,
 ) {
   const viewer = useBunja(fileViewerBunja);
   const fsEntry = viewer.fsEntry;
@@ -19,21 +19,21 @@ export function FileOpenPrompt(
     : formatSize(fsEntry.size);
 
   return (
-    <section className="file-open-prompt">
-      <div className="file-open-prompt-panel">
-        <div className="file-open-prompt-icon">
+    <section className="big-file-warning">
+      <div className="big-file-warning-panel">
+        <div className="big-file-warning-icon">
           <FileText size={24} />
         </div>
-        <div className="file-open-prompt-copy">
+        <div className="big-file-warning-copy">
           <h2>{displayName(fsEntry)}</h2>
           <p>
             This file is <strong>{sizeLabel}</strong>. Do you want to open it
             {" "}
-            with the {viewerLabel}?
+            with the {viewerName}?
           </p>
           <p>{fsEntry.path}</p>
         </div>
-        <div className="file-open-prompt-actions">
+        <div className="big-file-warning-actions">
           <button type="button" onClick={onCancel}>
             Cancel
           </button>
