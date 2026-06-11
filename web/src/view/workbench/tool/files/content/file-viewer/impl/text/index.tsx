@@ -1,4 +1,4 @@
-import { useContext, useEffect, useState } from "react";
+import { lazy, Suspense, useContext, useEffect, useState } from "react";
 import { useBunja } from "bunja/react";
 import { useAtomValue } from "jotai";
 import { readFile } from "../../../../../../../../protocol/rpc.ts";
@@ -10,6 +10,11 @@ import {
 import { BigFileWarning } from "../../big-file-warning.tsx";
 import { fileViewerBunja } from "../../state.tsx";
 import type { FileViewerImpl } from "../index.ts";
+
+const MonacoTextViewer = lazy(async () => {
+  const module = await import("./monaco-text-viewer.tsx");
+  return { default: module.MonacoTextViewer };
+});
 
 const inlineOpenLimitBytes = 1024 * 1024;
 
@@ -98,7 +103,17 @@ export function TextFileViewer() {
     );
   }
 
-  return <pre className="file-content">{state.text}</pre>;
+  return (
+    <Suspense
+      fallback={
+        <div className="file-viewer-status">
+          <span>Loading editor</span>
+        </div>
+      }
+    >
+      <MonacoTextViewer path={fsEntry.path} text={state.text} />
+    </Suspense>
+  );
 }
 
 function hasCompleteInitialBytes(
