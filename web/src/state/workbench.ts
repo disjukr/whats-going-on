@@ -29,7 +29,6 @@ export interface MoveTabToNewPaneResult {
 
 interface WorkbenchState {
   layout: LayoutState;
-  activeTool: WorkbenchTool;
   activePaneId?: string;
   panes: WorkbenchPane[];
 }
@@ -57,7 +56,6 @@ export const workbenchBunja = bunja(() => {
   const initialLayout = createLayout((builder) => builder.leaf(initialPaneId));
   const initialState: WorkbenchState = {
     layout: initialLayout,
-    activeTool: "files",
     activePaneId: initialPaneId,
     panes: [
       {
@@ -74,13 +72,13 @@ export const workbenchBunja = bunja(() => {
     { getOnInit: true },
   );
   const layoutAtom = atom((get) => get(stateAtom).layout);
-  const activeToolAtom = atom((get) => get(stateAtom).activeTool ?? "files");
   const activePaneIdAtom = atom((get) => {
     const state = get(stateAtom);
-    const activePane = state.panes.find((pane) =>
-      pane.id === state.activePaneId
-    );
-    return activePane?.id ?? state.panes[0]?.id;
+    return activePaneFromState(state)?.id;
+  });
+  const activeToolAtom = atom((get) => {
+    const state = get(stateAtom);
+    return activeTabFromPane(activePaneFromState(state))?.tool ?? "files";
   });
   const panesAtom = atom((get) => get(stateAtom).panes);
 
@@ -164,35 +162,35 @@ export const workbenchBunja = bunja(() => {
 
   function addToolTab(paneId: string, tool: WorkbenchTool) {
     const tab = createWorkbenchTab(tool);
-    updatePanes((current) =>
-      current.map((pane) =>
-        pane.id === paneId
-          ? {
-            ...pane,
-            tabs: [...pane.tabs, tab],
-            activeTabId: tab.id,
-          }
-          : pane
-      )
+    store.set(
+      stateAtom,
+      (current) => ({
+        ...current,
+        activePaneId: paneId,
+        panes: current.panes.map((pane) =>
+          pane.id === paneId
+            ? {
+              ...pane,
+              tabs: [...pane.tabs, tab],
+              activeTabId: tab.id,
+            }
+            : pane
+        ),
+      }),
     );
-    store.set(stateAtom, (current) => ({ ...current, activeTool: tool }));
-    focusPane(paneId);
   }
 
   function selectTab(paneId: string, tabId: string) {
-    updatePanes((current) =>
-      current.map((pane) =>
-        pane.id === paneId ? { ...pane, activeTabId: tabId } : pane
-      )
+    store.set(
+      stateAtom,
+      (current) => ({
+        ...current,
+        activePaneId: paneId,
+        panes: current.panes.map((pane) =>
+          pane.id === paneId ? { ...pane, activeTabId: tabId } : pane
+        ),
+      }),
     );
-    const tab = store
-      .get(stateAtom)
-      .panes.find((pane) => pane.id === paneId)
-      ?.tabs.find((item) => item.id === tabId);
-    if (tab) {
-      store.set(stateAtom, (current) => ({ ...current, activeTool: tab.tool }));
-    }
-    focusPane(paneId);
   }
 
   function closeTab(paneId: string, tabId: string) {
@@ -524,8 +522,8 @@ function openToolTabInActivePane(
   state: WorkbenchState,
   tool: WorkbenchTool,
 ): WorkbenchState {
-  const activePaneId = state.activePaneId ?? state.panes[0]?.id;
-  if (!activePaneId) return { ...state, activeTool: tool };
+  const activePaneId = activePaneFromState(state)?.id;
+  if (!activePaneId) return state;
 
   let opened = false;
   const panes = state.panes.map((pane) => {
@@ -546,13 +544,26 @@ function openToolTabInActivePane(
     };
   });
 
-  if (!opened) return { ...state, activeTool: tool };
+  if (!opened) return state;
   return {
     ...state,
     activePaneId,
-    activeTool: tool,
     panes,
   };
+}
+
+function activePaneFromState(
+  state: WorkbenchState,
+): WorkbenchPane | undefined {
+  return state.panes.find((pane) => pane.id === state.activePaneId) ??
+    state.panes[0];
+}
+
+function activeTabFromPane(
+  pane: WorkbenchPane | undefined,
+): WorkbenchTab | undefined {
+  if (!pane) return undefined;
+  return pane.tabs.find((tab) => tab.id === pane.activeTabId) ?? pane.tabs[0];
 }
 
 function cloneWorkbenchTab(tab: WorkbenchTab): WorkbenchTab {
