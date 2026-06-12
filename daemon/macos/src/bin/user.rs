@@ -66,7 +66,7 @@ fn default_daemon_url(config: &SystemConfig) -> String {
         .listen_addr
         .parse::<SocketAddr>()
         .map(|addr| addr.port())
-        .unwrap_or(8765);
+        .unwrap_or(9012);
     if let Some(domain) = config
         .domain
         .as_deref()

@@ -5,7 +5,7 @@
 
 @ description - Complete system daemon configuration document.
 struct SystemConfig {
-  @ description - Address the daemon listens on, for example `0.0.0.0:8765`.
+  @ description - Address the daemon listens on, for example `0.0.0.0:9012`.
   listenAddr: string,
 
   @ description - Public DNS name clients should use for WebTransport handshakes.

@@ -1,5 +1,5 @@
 param(
-  [string]$Listen = "0.0.0.0:8765",
+  [string]$Listen = "0.0.0.0:9012",
   [switch]$SkipBuild
 )
 
@@ -20,10 +20,6 @@ $UserExe = Join-Path $RepoRoot "target\debug\wgo-windows-user.exe"
 
 New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-
-if (-not (Test-Path -LiteralPath $ConfigPath)) {
-  throw "Missing dev config: $ConfigPath. Run deno task scaffold:dev-config first, then set domain to your Tailscale hostname."
-}
 
 function Stop-ProcessTree {
   param(

@@ -25,29 +25,24 @@ method errors.
 Run the currently implemented daemon pair:
 
 ```sh
-deno task scaffold:dev-config
-```
-
-Edit `tmp/dev/system-wgo.yaml` and set `domain` to the Windows machine's
-Tailscale hostname, or pass `-Domain` to the scaffold script.
-
-```sh
 deno task windows:dev:daemons
 ```
+
+If `tmp/dev/system-wgo.yaml` does not exist, the system daemon creates it. When
+Tailscale is installed, the generated config uses `tailscale status --json` to
+prefill `domain` from this machine's MagicDNS name. Otherwise, edit that file
+and set `domain` to the Windows machine's Tailscale hostname, or add explicit
+`tls` certificate paths. The daemon keeps running and enables transport once the
+config is valid.
 
 Run the macOS daemon pair in dev mode. The system daemon is launched with
 `sudo`; the user daemon runs as the current user.
 
 ```sh
-deno task scaffold:dev-config
-```
-
-Edit `tmp/dev/system-wgo.yaml` and set `domain` to the Mac's Tailscale
-hostname, or pass it as `DOMAIN=...`.
-
-```sh
 deno task macos:dev:daemons
 ```
+
+Use the same generated `tmp/dev/system-wgo.yaml` flow for macOS.
 
 Stop any detached dev daemons:
 

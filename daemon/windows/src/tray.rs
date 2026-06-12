@@ -15,30 +15,33 @@ pub fn run_pairing_tray(_config_path: PathBuf) -> Result<()> {
 mod windows_tray {
     use std::ffi::c_void;
     use std::mem::size_of;
-    use std::path::PathBuf;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
     use std::sync::OnceLock;
 
     use anyhow::{anyhow, Result};
+    use wgo_daemon_core::config::{generated_default_system_config, save};
     use windows::core::{w, PCWSTR};
     use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::Shell::{
-        Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD,
-        NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
+        ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO,
+        NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW,
+        NOTIFYICON_VERSION_4,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
         DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
         PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow, TrackPopupMenu,
-        TranslateMessage, HICON, LR_DEFAULTCOLOR, MF_SEPARATOR, MF_STRING, MSG, TPM_LEFTALIGN,
-        TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU,
-        WM_DESTROY, WNDCLASSW, WS_OVERLAPPED,
+        TranslateMessage, HICON, LR_DEFAULTCOLOR, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG,
+        SW_SHOWNORMAL, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_APP,
+        WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WNDCLASSW, WS_OVERLAPPED,
     };
 
     use crate::ipc::{spawn_pairing_notification_server, PairingNotification};
     use crate::pairing_ui::{
-        create_and_show_pairing_window_owned, show_error_window, show_machine_info_window_owned,
-        show_pairing_window, PairingWindowModel,
+        create_and_show_pairing_window_owned, is_pairing_ui_available, show_error_window,
+        show_machine_info_window_owned, show_pairing_window, PairingWindowModel,
     };
 
     const CLASS_NAME: PCWSTR = w!("WgoWindowsUserTrayWindow");
@@ -48,11 +51,14 @@ mod windows_tray {
     const TRAY_ICON_ID: u32 = 1;
     const CMD_SHOW_MACHINE_INFO: usize = 1001;
     const CMD_SHOW_PAIRING: usize = 1002;
-    const CMD_QUIT: usize = 1003;
+    const CMD_OPEN_SETTINGS: usize = 1003;
+    const CMD_QUIT: usize = 1004;
     const NIN_KEYSELECT: u32 = 1025;
     const TRAY_ICON_BYTES: &[u8] = include_bytes!("../assets/tray.ico");
     const TRAY_ICON_SIZE: i32 = 32;
     const ICON_RESOURCE_VERSION: u32 = 0x0003_0000;
+    const CONFIG_NOT_READY_MESSAGE: &str =
+        "Machine config is not ready. Set a .ts.net domain or TLS certificate files first.";
 
     struct TrayRuntime {
         config_path: PathBuf,
@@ -288,6 +294,7 @@ mod windows_tray {
                 match low_word(wparam.0) as usize {
                     CMD_SHOW_MACHINE_INFO => show_machine_info(hwnd),
                     CMD_SHOW_PAIRING => show_pairing_code(hwnd),
+                    CMD_OPEN_SETTINGS => open_settings(hwnd),
                     CMD_QUIT => {
                         let _ = unsafe { DestroyWindow(hwnd) };
                     }
@@ -330,10 +337,29 @@ mod windows_tray {
 
     unsafe fn show_context_menu_inner(hwnd: HWND) -> Result<()> {
         let menu = unsafe { CreatePopupMenu()? };
+        let config_ready = TRAY_RUNTIME
+            .get()
+            .is_some_and(|runtime| is_pairing_ui_available(&runtime.config_path));
+        let guarded_item_flags = if config_ready {
+            MF_STRING
+        } else {
+            MF_STRING | MF_GRAYED
+        };
         unsafe {
-            AppendMenuW(menu, MF_STRING, CMD_SHOW_MACHINE_INFO, w!("Machine info"))?;
-            AppendMenuW(menu, MF_STRING, CMD_SHOW_PAIRING, w!("Show pairing code"))?;
+            AppendMenuW(
+                menu,
+                guarded_item_flags,
+                CMD_SHOW_MACHINE_INFO,
+                w!("Machine info"),
+            )?;
+            AppendMenuW(
+                menu,
+                guarded_item_flags,
+                CMD_SHOW_PAIRING,
+                w!("Show pairing code"),
+            )?;
             AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())?;
+            AppendMenuW(menu, MF_STRING, CMD_OPEN_SETTINGS, w!("Settings"))?;
             AppendMenuW(menu, MF_STRING, CMD_QUIT, w!("Quit"))?;
         }
 
@@ -373,6 +399,10 @@ mod windows_tray {
             let _ = show_error_window("Tray runtime is not initialized.");
             return;
         };
+        if !is_pairing_ui_available(&runtime.config_path) {
+            let _ = show_error_window(CONFIG_NOT_READY_MESSAGE);
+            return;
+        }
         if let Err(err) = show_machine_info_window_owned(&runtime.config_path, hwnd) {
             let _ = show_error_window(&format!("Failed to show machine info:\n\n{err}"));
         }
@@ -383,9 +413,59 @@ mod windows_tray {
             let _ = show_error_window("Tray runtime is not initialized.");
             return;
         };
+        if !is_pairing_ui_available(&runtime.config_path) {
+            let _ = show_error_window(CONFIG_NOT_READY_MESSAGE);
+            return;
+        }
         if let Err(err) = create_and_show_pairing_window_owned(&runtime.config_path, None, hwnd) {
             let _ = show_error_window(&format!("Failed to create pairing code:\n\n{err}"));
         }
+    }
+
+    fn open_settings(hwnd: HWND) {
+        let Some(runtime) = TRAY_RUNTIME.get() else {
+            let _ = show_error_window("Tray runtime is not initialized.");
+            return;
+        };
+        if let Err(err) = open_config_file(hwnd, &runtime.config_path) {
+            let _ = show_error_window(&format!("Failed to open settings:\n\n{err}"));
+        }
+    }
+
+    fn open_config_file(hwnd: HWND, config_path: &Path) -> Result<()> {
+        ensure_config_file_exists(config_path)?;
+        let file = wide_path(config_path);
+        let result = unsafe {
+            ShellExecuteW(
+                Some(hwnd),
+                w!("open"),
+                PCWSTR(file.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        let result_code = result.0 as isize;
+        if result_code <= 32 {
+            return Err(anyhow!("ShellExecuteW failed with code {result_code}"));
+        }
+        Ok(())
+    }
+
+    fn ensure_config_file_exists(config_path: &Path) -> Result<()> {
+        if config_path.exists() {
+            return Ok(());
+        }
+        let config = generated_default_system_config();
+        save(config_path, &config)?;
+        Ok(())
+    }
+
+    fn wide_path(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     }
 
     fn show_pairing_notification(hwnd: HWND, notification: &PairingNotification) -> Result<()> {

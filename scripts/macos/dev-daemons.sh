@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LISTEN="${LISTEN:-0.0.0.0:8765}"
+LISTEN="${LISTEN:-0.0.0.0:9012}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 RUST_LOG="${RUST_LOG:-info}"
 
@@ -20,12 +20,6 @@ SYSTEM_EXE="$REPO_ROOT/target/debug/wgo-macos-system"
 USER_EXE="$REPO_ROOT/target/debug/wgo-macos-user"
 
 mkdir -p "$TMP_DIR" "$LOG_DIR"
-
-if [[ ! -f "$CONFIG_PATH" ]]; then
-  echo "Missing dev config: $CONFIG_PATH" >&2
-  echo "Run deno task scaffold:dev-config first, then set domain to your Tailscale hostname." >&2
-  exit 1
-fi
 
 stop_pid_file() {
   local label="$1"

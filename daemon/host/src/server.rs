@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -16,8 +17,8 @@ use tracing::{info, warn};
 use web_transport_quinn::proto::ConnectResponse;
 use wgo_daemon_core::cbor::Value;
 use wgo_daemon_core::config::{
-    load_or_default, load_pairing_state_or_default, pairing_state_path, save, save_pairing_state,
-    PairingState, SystemConfig,
+    daemon_status_path, load_or_default, load_or_generated_default, load_pairing_state_or_default,
+    pairing_state_path, save, save_pairing_state, PairingState, SystemConfig,
 };
 use wgo_daemon_core::pairing::{
     create_pairing_code, issue_client_secret, verify_client_secret, verify_pairing_code,
@@ -40,6 +41,7 @@ use crate::cert::{
 };
 
 const CERT_RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
+const CONFIG_STARTUP_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const SCHEDULED_CERT_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SUBSCRIPTION_DEBOUNCE: Duration = Duration::from_millis(150);
 const ROOTS_SUBSCRIPTION_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -77,9 +79,40 @@ pub async fn run_system_server(
     pairing_notifier: Option<SharedPairingNotifier>,
     log_label: &'static str,
 ) -> Result<()> {
+    loop {
+        write_daemon_status(&config_path, DaemonStatus::NotReady("starting"));
+        match run_system_server_once(
+            addr,
+            config_path.clone(),
+            files.clone(),
+            pairing_notifier.clone(),
+            log_label,
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                write_daemon_status(&config_path, DaemonStatus::NotReady(&err.to_string()));
+                warn!(
+                    ?err,
+                    config = %config_path.display(),
+                    "system daemon config is not ready; waiting for config changes"
+                );
+                wait_for_startup_config_change(&config_path).await?;
+            }
+        }
+    }
+}
+
+async fn run_system_server_once(
+    addr: SocketAddr,
+    config_path: PathBuf,
+    files: SharedFileService,
+    pairing_notifier: Option<SharedPairingNotifier>,
+    log_label: &'static str,
+) -> Result<()> {
     let provider = web_transport_quinn::crypto::default_provider();
-    let mut config = load_or_default(&config_path)?;
-    config.listen_addr = addr.to_string();
+    let mut config = load_startup_config(&config_path, addr)?;
     let certificate = prepare_server_certificate(&mut config, addr, &config_path, &provider)?;
     save(&config_path, &config)?;
     let config_state = Arc::new(Mutex::new(config));
@@ -88,6 +121,7 @@ pub async fn run_system_server(
 
     let resolver = Arc::new(ReloadingCertResolver::new(certificate.certified_key));
     let mut server = build_reloadable_server(addr, provider.clone(), resolver.clone())?;
+    write_daemon_status(&config_path, DaemonStatus::Ready);
 
     tokio::spawn(reload_certificates(
         config_path.clone(),
@@ -122,6 +156,112 @@ pub async fn run_system_server(
         });
     }
     Ok(())
+}
+
+async fn wait_for_startup_config_change(config_path: &Path) -> Result<()> {
+    let (reload_tx, mut reload_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut watcher = match create_certificate_watcher(reload_tx) {
+        Ok(watcher) => watcher,
+        Err(err) => {
+            warn!(
+                ?err,
+                config = %config_path.display(),
+                "failed to watch config; retrying startup later"
+            );
+            tokio::time::sleep(CONFIG_STARTUP_RETRY_INTERVAL).await;
+            return Ok(());
+        }
+    };
+
+    let mut watch_state = CertificateWatchState::default();
+    watch_config_parent(&mut watcher, &mut watch_state, config_path);
+    match load_or_default(config_path) {
+        Ok(config) => {
+            if let Err(err) =
+                update_certificate_watches(&mut watcher, &mut watch_state, config_path, &config)
+            {
+                warn!(?err, "failed to watch startup certificate paths");
+            }
+        }
+        Err(err) => {
+            warn!(
+                ?err,
+                config = %config_path.display(),
+                "failed to read startup config while setting watches"
+            );
+        }
+    }
+
+    loop {
+        tokio::select! {
+            trigger = reload_rx.recv() => {
+                let Some(trigger) = trigger else {
+                    warn!(
+                        config = %config_path.display(),
+                        "config watcher stopped; retrying startup later"
+                    );
+                    tokio::time::sleep(CONFIG_STARTUP_RETRY_INTERVAL).await;
+                    return Ok(());
+                };
+                let Some(trigger) = collect_reload_triggers(trigger, &mut reload_rx).await else {
+                    continue;
+                };
+                match trigger {
+                    CertificateReloadTrigger::Filesystem(paths) => {
+                        if paths.is_empty()
+                            || watch_state.config_changed(&paths)
+                            || watch_state.certificate_changed(&paths)
+                        {
+                            return Ok(());
+                        }
+                    }
+                    CertificateReloadTrigger::Scheduled => return Ok(()),
+                }
+            }
+            _ = tokio::time::sleep(CONFIG_STARTUP_RETRY_INTERVAL) => return Ok(()),
+        }
+    }
+}
+
+fn load_startup_config(config_path: &Path, addr: SocketAddr) -> Result<SystemConfig> {
+    let should_create = !config_path.exists();
+    let mut config = load_or_generated_default(config_path)?;
+    config.listen_addr = addr.to_string();
+    if should_create {
+        save(config_path, &config)?;
+    }
+    Ok(config)
+}
+
+enum DaemonStatus<'a> {
+    Ready,
+    NotReady(&'a str),
+}
+
+fn write_daemon_status(config_path: &Path, status: DaemonStatus<'_>) {
+    let status_path = daemon_status_path(config_path);
+    if let Some(parent) = status_path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            warn!(
+                ?err,
+                path = %parent.display(),
+                "failed to create daemon status directory"
+            );
+            return;
+        }
+    }
+
+    let text = match status {
+        DaemonStatus::Ready => "ready\n".to_string(),
+        DaemonStatus::NotReady(reason) => format!("not-ready\n{reason}\n"),
+    };
+    if let Err(err) = fs::write(&status_path, text) {
+        warn!(
+            ?err,
+            path = %status_path.display(),
+            "failed to write daemon status"
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -240,11 +380,13 @@ async fn reload_certificates(
         let mut config = match load_or_default(&config_path) {
             Ok(config) => config,
             Err(err) => {
+                write_daemon_status(&config_path, DaemonStatus::NotReady(&err.to_string()));
                 warn!(?err, config = %config_path.display(), "failed to read config for certificate reload");
                 continue;
             }
         };
         let next_reload_key = certificate_reload_key(&config);
+        let filesystem_trigger = matches!(&trigger, CertificateReloadTrigger::Filesystem(_));
         let should_reload = match trigger {
             CertificateReloadTrigger::Scheduled => uses_scheduled_certificate_refresh(&config),
             CertificateReloadTrigger::Filesystem(paths) => {
@@ -277,6 +419,9 @@ async fn reload_certificates(
         })();
 
         if let Err(err) = response {
+            if filesystem_trigger {
+                write_daemon_status(&config_path, DaemonStatus::NotReady(&err.to_string()));
+            }
             warn!(
                 ?err,
                 "certificate reload failed; keeping previous certificate"
@@ -285,6 +430,7 @@ async fn reload_certificates(
                 warn!("certificate resolver has no usable certificate");
             }
         } else {
+            write_daemon_status(&config_path, DaemonStatus::Ready);
             if let Err(err) =
                 update_certificate_watches(&mut watcher, &mut watch_state, &config_path, &config)
             {
@@ -1535,7 +1681,7 @@ fn pairing_daemon_url(config: &SystemConfig) -> String {
         .listen_addr
         .parse::<SocketAddr>()
         .map(|addr| addr.port())
-        .unwrap_or(8765);
+        .unwrap_or(9012);
     if let Some(domain) = config
         .domain
         .as_deref()
@@ -1746,6 +1892,18 @@ mod tests {
         WriteFileStart,
     };
 
+    #[test]
+    fn creates_startup_config_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("nested").join("wgo.yaml");
+        let addr: SocketAddr = "127.0.0.1:9012".parse().unwrap();
+
+        let config = load_startup_config(&config_path, addr).unwrap();
+
+        assert_eq!(config.listen_addr, "127.0.0.1:9012");
+        assert_eq!(load_or_default(&config_path).unwrap(), config);
+    }
+
     #[tokio::test]
     async fn complete_pairing_reads_config_written_after_server_start() {
         let dir = tempfile::tempdir().unwrap();
@@ -1871,7 +2029,7 @@ mod tests {
         let pairing = stored.pairing.unwrap();
         let notifications = notifier.notifications.lock().unwrap();
         assert_eq!(notifications.len(), 1);
-        assert_eq!(notifications[0].daemon_url, "https://localhost:8765");
+        assert_eq!(notifications[0].daemon_url, "https://localhost:9012");
         assert!(verify_pairing_code(
             &pairing,
             &notifications[0].pairing_code,

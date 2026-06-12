@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LISTEN="${LISTEN:-0.0.0.0:8765}"
+LISTEN="${LISTEN:-0.0.0.0:9012}"
 URL="${URL:-}"
 BUILD="${BUILD:-0}"
 
@@ -12,11 +12,6 @@ SYSTEM_EXE="$REPO_ROOT/target/debug/wgo-macos-system"
 
 if [[ "$BUILD" == "1" || ! -x "$SYSTEM_EXE" ]]; then
   cargo build -p wgo-macos-daemon --bin wgo-macos-system
-fi
-
-if [[ ! -f "$CONFIG_PATH" ]]; then
-  echo "Config not found: $CONFIG_PATH. Run deno task scaffold:dev-config first." >&2
-  exit 1
 fi
 
 ARGS=(pair --listen "$LISTEN" --config "$CONFIG_PATH")

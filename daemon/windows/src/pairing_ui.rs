@@ -1,10 +1,10 @@
 use anyhow::Result;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use wgo_daemon_core::config::{
-    load_or_default, load_pairing_state_or_default, pairing_state_path, save_pairing_state,
-    SystemConfig,
+    daemon_status_path, load_or_default, load_pairing_state_or_default, pairing_state_path,
+    save_pairing_state, SystemConfig, TlsConfig,
 };
 use wgo_daemon_core::pairing::create_pairing_code;
 
@@ -34,6 +34,13 @@ pub fn show_machine_info_window(config_path: &Path) -> Result<()> {
     show_machine_info(&MachineInfoWindowModel {
         daemon_url: default_daemon_url(&config),
     })
+}
+
+pub fn is_pairing_ui_available(config_path: &Path) -> bool {
+    let Ok(config) = load_or_default(config_path) else {
+        return false;
+    };
+    has_usable_daemon_endpoint(config_path, &config) && daemon_status_is_ready(config_path)
 }
 
 #[cfg(windows)]
@@ -93,7 +100,7 @@ fn default_daemon_url(config: &SystemConfig) -> String {
         .listen_addr
         .parse::<SocketAddr>()
         .map(|addr| addr.port())
-        .unwrap_or(8765);
+        .unwrap_or(9012);
     if let Some(domain) = config
         .domain
         .as_deref()
@@ -106,6 +113,44 @@ fn default_daemon_url(config: &SystemConfig) -> String {
         return format!("https://{domain}:{port}");
     }
     format!("https://localhost:{port}")
+}
+
+fn has_usable_daemon_endpoint(config_path: &Path, config: &SystemConfig) -> bool {
+    if let Some(tls) = &config.tls {
+        return configured_tls_files_exist(config_path, tls);
+    }
+    config
+        .domain
+        .as_deref()
+        .map(str::trim)
+        .filter(|domain| !domain.is_empty())
+        .is_some_and(|domain| {
+            domain
+                .trim_end_matches('.')
+                .to_ascii_lowercase()
+                .ends_with(".ts.net")
+        })
+}
+
+fn daemon_status_is_ready(config_path: &Path) -> bool {
+    std::fs::read_to_string(daemon_status_path(config_path))
+        .is_ok_and(|status| status.lines().next() == Some("ready"))
+}
+
+fn configured_tls_files_exist(config_path: &Path, tls: &TlsConfig) -> bool {
+    resolve_config_relative(config_path, &tls.cert_file).is_file()
+        && resolve_config_relative(config_path, &tls.key_file).is_file()
+}
+
+fn resolve_config_relative(config_path: &Path, raw: &str) -> PathBuf {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        return path;
+    }
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(path)
 }
 
 fn create_and_save_pairing_code(config_path: &Path) -> Result<ActivePairingCode> {

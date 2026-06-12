@@ -17,7 +17,7 @@ if (!configTls.trustedTls) {
     `${args.config} must configure tls or a .ts.net domain; self-signed hash pinning is not supported`,
   );
 }
-const baseUrl = args.url ?? configTls.defaultUrl ?? "https://localhost:8765";
+const baseUrl = args.url ?? configTls.defaultUrl ?? "https://localhost:9012";
 
 const rpcUrl = rpcEndpoint(baseUrl);
 
@@ -56,7 +56,7 @@ function parseArgs(argv: string[]): Args {
 function printHelp() {
   console.log(`Usage:
   deno task check:daemon
-  deno run --unstable-net --allow-net --allow-read=.. src/tools/check-daemon.ts [--url https://localhost:8765] [--config ../tmp/dev/system-wgo.yaml]
+  deno run --unstable-net --allow-net --allow-read=.. src/tools/check-daemon.ts [--url https://localhost:9012] [--config ../tmp/dev/system-wgo.yaml]
 `);
 }
 
@@ -77,7 +77,7 @@ async function readConfigTls(
     !!domain?.endsWith(".ts.net");
   return {
     trustedTls,
-    defaultUrl: domain ? `https://${domain}:8765` : undefined,
+    defaultUrl: domain ? `https://${domain}:9012` : undefined,
   };
 }
 

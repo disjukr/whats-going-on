@@ -1,5 +1,5 @@
 param(
-  [string]$Listen = "0.0.0.0:8765",
+  [string]$Listen = "0.0.0.0:9012",
   [string]$Url,
   [switch]$Build
 )
@@ -22,10 +22,6 @@ if ($Build -or -not (Test-Path $SystemExe)) {
 if (-not (Test-Path $SystemExe)) {
   throw "Missing $SystemExe. Run without -SkipBuild first."
 }
-if (-not (Test-Path $ConfigPath)) {
-  throw "Config not found: $ConfigPath. Run deno task scaffold:dev-config first."
-}
-
 $commandArgs = @("pair", "--listen", $Listen, "--config", $ConfigPath)
 if ($Url) {
   $commandArgs += @("--url", $Url)

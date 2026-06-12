@@ -1,6 +1,5 @@
 {
   "tasks": {
-    "scaffold:dev-config": "deno run --allow-env=DOMAIN,LISTEN,FORCE --allow-read=tmp/dev --allow-write=tmp scripts/scaffold-dev-config.ts",
     "macos:dev:daemons": "./scripts/macos/dev-daemons.sh",
     "macos:kill:daemons": "./scripts/macos/kill-daemons.sh",
     "macos:pair:dev": "./scripts/macos/pair-dev.sh",

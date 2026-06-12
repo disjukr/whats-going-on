@@ -305,7 +305,7 @@ function MachineConfigForm(
         <input
           value={configUrlDraft}
           onChange={(event) => onConfigUrlChange(event.target.value)}
-          placeholder="https://host:8765"
+          placeholder="https://host:9012"
           aria-label="Machine URL"
         />
       </label>

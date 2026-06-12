@@ -277,7 +277,7 @@ mod tests {
 
         let prepared = prepare_server_certificate(
             &mut config,
-            "127.0.0.1:8765".parse().unwrap(),
+            "127.0.0.1:9012".parse().unwrap(),
             &config_path,
             &provider,
         )
@@ -296,7 +296,7 @@ mod tests {
 
         let err = match prepare_server_certificate(
             &mut config,
-            "127.0.0.1:8765".parse().unwrap(),
+            "127.0.0.1:9012".parse().unwrap(),
             dir.path(),
             &provider,
         ) {
@@ -314,7 +314,7 @@ mod tests {
 
         let err = match prepare_server_certificate(
             &mut config,
-            "127.0.0.1:8765".parse().unwrap(),
+            "127.0.0.1:9012".parse().unwrap(),
             dir.path(),
             &provider,
         ) {

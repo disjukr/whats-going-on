@@ -51,7 +51,7 @@ export function AddMachineForm(
         <input
           value={baseUrl}
           onChange={(event) => onBaseUrlChange(event.target.value)}
-          placeholder="https://host:8765"
+          placeholder="https://host:9012"
           aria-label="Machine URL"
         />
       </label>
