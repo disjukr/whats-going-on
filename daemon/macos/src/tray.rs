@@ -4,6 +4,7 @@ use std::sync::mpsc::Sender;
 use anyhow::{anyhow, Context, Result};
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
+use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
 use wgo_daemon_core::config::{generated_default_system_config, load_or_default, save};
@@ -33,7 +34,9 @@ enum UserEvent {
 }
 
 pub fn run_pairing_tray(config_path: PathBuf) -> Result<()> {
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    event_loop.set_activation_policy(ActivationPolicy::Accessory);
+    event_loop.set_dock_visibility(false);
     let proxy = event_loop.create_proxy();
     MenuEvent::set_event_handler(Some({
         let proxy = proxy.clone();
@@ -179,20 +182,12 @@ fn ensure_config_file_exists(config_path: &Path) -> Result<()> {
 }
 
 fn create_template_icon() -> Result<Icon> {
-    const SIZE: u32 = 18;
-    let mut rgba = vec![0; (SIZE * SIZE * 4) as usize];
-    for y in 2..16 {
-        for x in 2..16 {
-            let dx = x as i32 - 9;
-            let dy = y as i32 - 9;
-            if dx * dx + dy * dy <= 49 {
-                let index = ((y * SIZE + x) * 4) as usize;
-                rgba[index] = 0;
-                rgba[index + 1] = 0;
-                rgba[index + 2] = 0;
-                rgba[index + 3] = 255;
-            }
-        }
+    const SIZE: u32 = 64;
+    const WGO_TRAY_RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/wgo-tray.rgba"));
+
+    let rgba = WGO_TRAY_RGBA.to_vec();
+    if rgba.len() != (SIZE * SIZE * 4) as usize {
+        return Err(anyhow!("generated macOS tray icon has an invalid size"));
     }
     Icon::from_rgba(rgba, SIZE, SIZE).map_err(Into::into)
 }
