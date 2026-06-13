@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use wgo_daemon_core::config::{daemon_status_path, load_or_default, SystemConfig, TlsConfig};
 
 #[cfg(windows)]
@@ -11,6 +12,12 @@ pub struct PairingWindowModel {
     pub daemon_url: String,
     pub pairing_code: String,
     pub expires_in_seconds: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PairingConfirmationModel {
+    pub confirmation_code: String,
+    pub client_label: String,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +53,29 @@ pub fn show_machine_info_window_owned(config_path: &Path, owner: HWND) -> Result
 pub fn show_pairing_window(model: &PairingWindowModel) -> Result<()> {
     let message = pairing_dialog_content(&model.pairing_code, model.expires_in_seconds);
     show_copyable_text_window("Pairing code", &message, &model.pairing_code)
+}
+
+#[cfg(windows)]
+pub fn confirm_pairing_request_owned(
+    model: &PairingConfirmationModel,
+    owner: HWND,
+) -> Result<bool> {
+    let candidates = confirmation_code_candidates(&model.confirmation_code);
+    let message = format!(
+        "Client:\n{}\n\nSelect the two-digit code shown on that client.",
+        pairing_client_label(&model.client_label)
+    );
+    let Some(selected) =
+        task_dialog::select_owned("Confirm pairing", &message, &candidates, owner)?
+    else {
+        return Ok(false);
+    };
+    Ok(selected == model.confirmation_code)
+}
+
+#[cfg(windows)]
+pub fn close_active_pairing_confirmation_window() {
+    task_dialog::close_active_select_dialog();
 }
 
 pub fn show_machine_info(model: &MachineInfoWindowModel) -> Result<()> {
@@ -142,6 +172,63 @@ fn format_remaining_time(seconds: i64) -> String {
     format!("{minutes:02}:{seconds:02}")
 }
 
+fn confirmation_code_candidates(code: &str) -> Vec<String> {
+    let normalized = normalize_confirmation_code(code);
+    let mut seed = confirmation_candidate_seed(&normalized);
+    let mut candidates = vec![normalized.clone()];
+    while candidates.len() < 4 {
+        seed = lcg_next(seed);
+        let candidate = format!("{:02}", seed % 100);
+        if !candidates.iter().any(|existing| existing == &candidate) {
+            candidates.push(candidate);
+        }
+    }
+
+    for index in (1..candidates.len()).rev() {
+        seed = lcg_next(seed);
+        let swap_index = (seed as usize) % (index + 1);
+        candidates.swap(index, swap_index);
+    }
+    candidates
+}
+
+fn normalize_confirmation_code(code: &str) -> String {
+    let digits: String = code
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .take(2)
+        .collect();
+    if digits.len() == 2 {
+        digits
+    } else {
+        "00".to_string()
+    }
+}
+
+fn pairing_client_label(label: &str) -> &str {
+    let label = label.trim();
+    if label.is_empty() {
+        "Unknown client"
+    } else {
+        label
+    }
+}
+
+fn confirmation_candidate_seed(code: &str) -> u64 {
+    let time_seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    code.bytes()
+        .fold(time_seed ^ 0x9e37_79b9_7f4a_7c15, |seed, byte| {
+            seed.rotate_left(5) ^ u64::from(byte)
+        })
+}
+
+fn lcg_next(seed: u64) -> u64 {
+    seed.wrapping_mul(6364136223846793005).wrapping_add(1)
+}
+
 #[cfg(windows)]
 fn show_copyable_text_window(title: &str, text: &str, copy_text: &str) -> Result<()> {
     task_dialog::show(title, text, copy_text)
@@ -177,24 +264,29 @@ fn show_message_box(title: &str, message: &str) -> Result<()> {
 
 #[cfg(windows)]
 mod task_dialog {
+    use std::ffi::c_void;
     use std::mem::size_of;
     use std::ptr::copy_nonoverlapping;
+    use std::sync::{Mutex, OnceLock};
 
     use anyhow::{anyhow, Context, Result};
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{HANDLE, HWND};
+    use windows::core::{HRESULT, PCWSTR};
+    use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::UI::Controls::{
-        TaskDialogIndirect, TASKDIALOGCONFIG, TASKDIALOG_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
-        TDF_SIZE_TO_CONTENT,
+        TaskDialogIndirect, TASKDIALOGCONFIG, TASKDIALOG_BUTTON, TASKDIALOG_NOTIFICATIONS,
+        TDF_ALLOW_DIALOG_CANCELLATION, TDF_SIZE_TO_CONTENT, TDM_CLICK_BUTTON, TDN_CREATED,
     };
+    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, IDCANCEL};
 
     const CMD_COPY: usize = 2001;
     const CMD_CLOSE: usize = 2002;
+    const CMD_OPTION_BASE: usize = 2100;
     const CF_UNICODETEXT_FORMAT: u32 = 13;
+    static ACTIVE_SELECT_DIALOG: OnceLock<Mutex<Option<isize>>> = OnceLock::new();
 
     pub fn show(title: &str, text: &str, copy_text: &str) -> Result<()> {
         show_owned(title, text, copy_text, HWND::default())
@@ -240,6 +332,93 @@ mod task_dialog {
             copy_to_clipboard(copy_text).context("copy dialog value")?;
         }
         Ok(())
+    }
+
+    pub fn select_owned(
+        title: &str,
+        text: &str,
+        options: &[String],
+        owner: HWND,
+    ) -> Result<Option<String>> {
+        let window_title = wide_null("Whats Going On");
+        let main_instruction = wide_null(title);
+        let content = wide_null(text);
+        let option_texts: Vec<Vec<u16>> = options.iter().map(|option| wide_null(option)).collect();
+        let buttons: Vec<TASKDIALOG_BUTTON> = option_texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| TASKDIALOG_BUTTON {
+                nButtonID: (CMD_OPTION_BASE + index) as i32,
+                pszButtonText: PCWSTR(text.as_ptr()),
+            })
+            .collect();
+
+        let config = TASKDIALOGCONFIG {
+            cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
+            hwndParent: owner,
+            dwFlags: TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT,
+            pszWindowTitle: PCWSTR(window_title.as_ptr()),
+            pszMainInstruction: PCWSTR(main_instruction.as_ptr()),
+            pszContent: PCWSTR(content.as_ptr()),
+            cButtons: buttons.len() as u32,
+            pButtons: buttons.as_ptr(),
+            nDefaultButton: CMD_OPTION_BASE as i32,
+            pfCallback: Some(select_dialog_callback),
+            ..Default::default()
+        };
+
+        let mut selected_button = 0;
+        unsafe {
+            TaskDialogIndirect(&config, Some(&mut selected_button), None, None)
+                .context("show task dialog")?;
+        }
+        clear_active_select_dialog();
+
+        let index = selected_button - CMD_OPTION_BASE as i32;
+        if index < 0 {
+            return Ok(None);
+        }
+        Ok(options.get(index as usize).cloned())
+    }
+
+    pub fn close_active_select_dialog() {
+        let Some(hwnd_value) = active_select_dialog().lock().ok().and_then(|hwnd| *hwnd) else {
+            return;
+        };
+        let hwnd = HWND(hwnd_value as *mut c_void);
+        let _ = unsafe {
+            PostMessageW(
+                Some(hwnd),
+                TDM_CLICK_BUTTON.0 as u32,
+                WPARAM(IDCANCEL.0 as usize),
+                LPARAM(0),
+            )
+        };
+    }
+
+    fn active_select_dialog() -> &'static Mutex<Option<isize>> {
+        ACTIVE_SELECT_DIALOG.get_or_init(|| Mutex::new(None))
+    }
+
+    fn clear_active_select_dialog() {
+        if let Ok(mut active) = active_select_dialog().lock() {
+            *active = None;
+        }
+    }
+
+    unsafe extern "system" fn select_dialog_callback(
+        hwnd: HWND,
+        msg: TASKDIALOG_NOTIFICATIONS,
+        _wparam: WPARAM,
+        _lparam: LPARAM,
+        _lprefdata: isize,
+    ) -> HRESULT {
+        if msg == TDN_CREATED {
+            if let Ok(mut active) = active_select_dialog().lock() {
+                *active = Some(hwnd.0 as isize);
+            }
+        }
+        HRESULT(0)
     }
 
     fn copy_to_clipboard(text: &str) -> Result<()> {

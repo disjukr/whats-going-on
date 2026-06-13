@@ -29,7 +29,7 @@ const PROC_RENEW_CLIENT_CREDENTIAL = 11;
 const CONNECT_TIMEOUT_MS = 10_000;
 const DATAGRAM_PING_TIMEOUT_MS = 5_000;
 
-interface RpcSession {
+export interface RpcSession {
   transport: WebTransport;
   datagrams: DatagramRuntime;
 }
@@ -185,27 +185,16 @@ export function isInvalidCredentialsError(err: unknown): boolean {
 }
 
 export async function completePairing(
-  machine: Machine,
+  session: RpcSession,
   code: string,
-  clientLabel: string,
 ): Promise<CompletePairingResponse> {
-  const fields: [number, CborValue][] = [
-    [1, code],
-    [2, clientLabel],
-  ];
-  if (machine.clientId) {
-    fields.push([3, machine.clientId]);
-  }
   const payload = encodeCbor(
-    new Map<number, CborValue>(fields),
+    new Map<number, CborValue>([[1, code]]),
   );
-  const response = await callUnaryPayload(
-    machine,
+  const response = await sendUnaryPayload(
+    session.transport,
     PROC_COMPLETE_PAIRING,
     payload,
-    {
-      includeAuth: false,
-    },
   );
   const map = decodeMap(response);
   return {
@@ -229,15 +218,25 @@ export async function renewClientCredential(
 }
 
 export async function startPairing(
+  session: RpcSession,
   machine: Machine,
+  confirmationCode: string,
+  clientLabel: string,
 ): Promise<StartPairingResponse> {
-  const response = await callUnaryPayload(
-    machine,
+  const fields: [number, CborValue][] = [
+    [1, confirmationCode],
+    [2, clientLabel],
+  ];
+  if (machine.clientId) {
+    fields.push([3, machine.clientId]);
+  }
+  const payload = encodeCbor(
+    new Map<number, CborValue>(fields),
+  );
+  const response = await sendUnaryPayload(
+    session.transport,
     PROC_START_PAIRING,
-    undefined,
-    {
-      includeAuth: false,
-    },
+    payload,
   );
   const map = decodeMap(response);
   return {
@@ -395,7 +394,7 @@ export async function deletePaths(
 
 export async function checkReachable(machine: Machine): Promise<number> {
   const startedAt = performance.now();
-  const session = await connect(machine, "/rpc");
+  const session = await openRpcSession(machine, "/rpc");
   try {
     return performance.now() - startedAt;
   } finally {
@@ -418,6 +417,16 @@ async function callUnaryPayload(
   return response;
 }
 
+export async function sendUnaryPayload(
+  transport: WebTransport,
+  procId: number,
+  payload?: Uint8Array,
+): Promise<Uint8Array> {
+  const response = await sendUnary(transport, procId, payload);
+  if (!response) throw new Error("missing response payload");
+  return response;
+}
+
 async function callUnary(
   machine: Machine,
   procId: number,
@@ -436,7 +445,7 @@ async function callUnary(
     }
   }
 
-  const session = await connect(machine, "/rpc");
+  const session = await openRpcSession(machine, "/rpc");
   try {
     return await sendUnary(session.transport, procId, payload);
   } finally {
@@ -481,7 +490,7 @@ async function callClientStream(
     }
   }
 
-  const session = await connect(machine, "/rpc");
+  const session = await openRpcSession(machine, "/rpc");
   try {
     return await sendClientStream(
       session.transport,
@@ -516,7 +525,7 @@ async function* callServerStreamEvents<T>(
     return;
   }
 
-  const session = await connect(machine, "/rpc");
+  const session = await openRpcSession(machine, "/rpc");
   try {
     yield* streamServerEvents(
       session.transport,
@@ -529,9 +538,9 @@ async function* callServerStreamEvents<T>(
   }
 }
 
-async function connect(
+export async function openRpcSession(
   machine: Machine,
-  path: string,
+  path = "/rpc",
 ): Promise<RpcSession> {
   const transport = new WebTransport(
     `${normalizeMachineUrl(machine.baseUrl)}${path}`,
@@ -578,7 +587,7 @@ function authenticatedSession(machine: Machine): Promise<RpcSession> {
     if (!machine.clientId || !machine.clientSecret) {
       throw new Error("missing paired client credentials");
     }
-    const session = await connect(machine, "/rpc");
+    const session = await openRpcSession(machine, "/rpc");
     try {
       await authenticateSession(
         session.transport,
@@ -769,7 +778,7 @@ function nextPingId(runtime: DatagramRuntime): number {
   return runtime.nextPingId;
 }
 
-function closeRpcSession(session: RpcSession): void {
+export function closeRpcSession(session: RpcSession): void {
   closeDatagramRuntime(session.datagrams, new Error("RPC session closed"));
   session.transport.close();
 }

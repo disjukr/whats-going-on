@@ -113,6 +113,9 @@ export function MachineModalHost() {
   const machineModalMode = useAtomValue(machineModal.machineModalModeAtom);
   const machineFormError = useAtomValue(machineModal.machineFormErrorAtom);
   const pairingCode = useAtomValue(machineModal.pairingCodeAtom);
+  const pairingConfirmationCode = useAtomValue(
+    machineModal.pairingConfirmationCodeAtom,
+  );
   const pairingCodeExpiresAtUnix = useAtomValue(
     machineModal.pairingCodeExpiresAtUnixAtom,
   );
@@ -136,14 +139,16 @@ export function MachineModalHost() {
       return;
     }
     if (machineModalMode === "pair") {
-      pairingCodeInputRef.current?.focus();
+      if (pairingCodeExpiresAtUnix !== undefined) {
+        pairingCodeInputRef.current?.focus();
+      }
       return;
     }
     if (machineModalMode === "config") {
       configNameInputRef.current?.focus();
       configNameInputRef.current?.select();
     }
-  }, [machineModalMode]);
+  }, [machineModalMode, pairingCodeExpiresAtUnix]);
 
   useEffect(() => {
     if (!machineModalMode || machines.length === 0) return;
@@ -202,7 +207,7 @@ export function MachineModalHost() {
 
   async function pairSelected(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await machineModal.pairSelected(browserClientLabel());
+    await machineModal.pairSelected();
   }
 
   const pairingCodeExpiresInSeconds = pairingCodeExpiresAtUnix === undefined
@@ -228,6 +233,7 @@ export function MachineModalHost() {
       mode={machineModalMode}
       modalTitle={modalTitle}
       pairingCode={pairingCode}
+      pairingConfirmationCode={pairingConfirmationCode}
       pairingCodeExpiresInSeconds={pairingCodeExpiresInSeconds}
       pairingCodeInputRef={pairingCodeInputRef}
       selected={selected}
@@ -244,8 +250,4 @@ export function MachineModalHost() {
       onSaveMachineConfig={saveMachineConfig}
     />
   );
-}
-
-function browserClientLabel(): string {
-  return globalThis.navigator?.userAgent.trim() || "web";
 }

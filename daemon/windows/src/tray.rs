@@ -17,6 +17,7 @@ mod windows_tray {
     use std::mem::size_of;
     use std::os::windows::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
+    use std::sync::mpsc::Sender;
     use std::sync::{Mutex, OnceLock};
 
     use anyhow::{anyhow, Result};
@@ -26,8 +27,8 @@ mod windows_tray {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::Shell::{
         ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_REALTIME, NIF_TIP,
-        NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW,
-        NOTIFYICON_VERSION_4,
+        NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_BALLOONUSERCLICK,
+        NIN_SELECT, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
@@ -38,16 +39,21 @@ mod windows_tray {
         WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WNDCLASSW, WS_OVERLAPPED,
     };
 
-    use crate::ipc::{spawn_pairing_notification_server, PairingNotification};
+    use crate::ipc::{
+        spawn_pairing_notification_server, PairingConfirmationRequest, PairingIpcRequest,
+        PairingNotification,
+    };
     use crate::pairing_ui::{
+        close_active_pairing_confirmation_window, confirm_pairing_request_owned,
         is_pairing_ui_available, show_error_window, show_machine_info_window_owned,
-        show_pairing_window, PairingWindowModel,
+        show_pairing_window, PairingConfirmationModel, PairingWindowModel,
     };
 
     const CLASS_NAME: PCWSTR = w!("WgoWindowsUserTrayWindow");
     const WINDOW_TITLE: PCWSTR = w!("Whats Going On");
     const TRAY_MESSAGE: u32 = WM_APP + 1;
     const PAIRING_NOTIFICATION_MESSAGE: u32 = WM_APP + 2;
+    const PAIRING_CONFIRMATION_MESSAGE: u32 = WM_APP + 3;
     const TRAY_ICON_ID: u32 = 1;
     const CMD_SHOW_MACHINE_INFO: usize = 1001;
     const CMD_OPEN_SETTINGS: usize = 1002;
@@ -69,8 +75,17 @@ mod windows_tray {
         message_posted: bool,
     }
 
+    #[derive(Default)]
+    struct PendingPairingConfirmation {
+        request: Option<PairingConfirmationRequest>,
+        responder: Option<Sender<Result<(), String>>>,
+        message_posted: bool,
+    }
+
     static TRAY_RUNTIME: OnceLock<TrayRuntime> = OnceLock::new();
     static PENDING_PAIRING_NOTIFICATION: OnceLock<Mutex<PendingPairingNotification>> =
+        OnceLock::new();
+    static PENDING_PAIRING_CONFIRMATION: OnceLock<Mutex<PendingPairingConfirmation>> =
         OnceLock::new();
 
     pub fn run(config_path: PathBuf) -> Result<()> {
@@ -85,8 +100,13 @@ mod windows_tray {
             let icon = load_tray_icon()?;
             add_tray_icon(hwnd, icon)?;
             let hwnd_value = hwnd.0 as usize;
-            spawn_pairing_notification_server(move |notification| {
-                post_pairing_notification(hwnd_value, notification);
+            spawn_pairing_notification_server(move |request| match request {
+                PairingIpcRequest::Confirm(request) => {
+                    confirm_pairing_request_via_tray(hwnd_value, request)
+                }
+                PairingIpcRequest::ShowCode(notification) => {
+                    post_pairing_notification(hwnd_value, notification)
+                }
             });
 
             let message_result = run_message_loop();
@@ -274,7 +294,14 @@ mod windows_tray {
             TRAY_MESSAGE => {
                 let event = tray_event(lparam);
                 match event {
-                    NIN_SELECT | NIN_KEYSELECT => show_machine_info(hwnd),
+                    NIN_BALLOONUSERCLICK => show_pending_pairing_confirmation(hwnd),
+                    NIN_SELECT | NIN_KEYSELECT => {
+                        if has_pending_pairing_confirmation() {
+                            show_pending_pairing_confirmation(hwnd);
+                        } else {
+                            show_machine_info(hwnd);
+                        }
+                    }
                     WM_CONTEXTMENU => show_context_menu(hwnd),
                     _ => {}
                 }
@@ -299,6 +326,15 @@ mod windows_tray {
                 }
                 LRESULT(0)
             }
+            PAIRING_CONFIRMATION_MESSAGE => {
+                if let Err(err) = show_pairing_confirmation_notification(hwnd) {
+                    let _ = show_error_window(&format!(
+                        "Failed to show pairing confirmation notification:\n\n{err}"
+                    ));
+                    show_pending_pairing_confirmation(hwnd);
+                }
+                LRESULT(0)
+            }
             WM_COMMAND => {
                 match low_word(wparam.0) as usize {
                     CMD_SHOW_MACHINE_INFO => show_machine_info(hwnd),
@@ -319,17 +355,20 @@ mod windows_tray {
         }
     }
 
-    fn post_pairing_notification(hwnd_value: usize, notification: PairingNotification) {
+    fn post_pairing_notification(
+        hwnd_value: usize,
+        notification: PairingNotification,
+    ) -> Result<()> {
         let should_post = match queue_pairing_notification(notification) {
             Ok(should_post) => should_post,
             Err(err) => {
                 let _ =
                     show_error_window(&format!("Failed to queue pairing notification:\n\n{err}"));
-                return;
+                return Err(err);
             }
         };
         if !should_post {
-            return;
+            return Ok(());
         }
 
         let hwnd = HWND(hwnd_value as *mut c_void);
@@ -343,7 +382,9 @@ mod windows_tray {
         } {
             clear_pending_pairing_notification();
             let _ = show_error_window(&format!("Failed to queue pairing notification:\n\n{err}"));
+            return Err(err.into());
         }
+        Ok(())
     }
 
     fn pending_pairing_notification() -> &'static Mutex<PendingPairingNotification> {
@@ -376,6 +417,108 @@ mod windows_tray {
             pending.message_posted = false;
             pending.notification = None;
         }
+    }
+
+    fn confirm_pairing_request_via_tray(
+        hwnd_value: usize,
+        request: PairingConfirmationRequest,
+    ) -> Result<()> {
+        close_active_pairing_confirmation_window();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let should_post = queue_pairing_confirmation(request, sender)?;
+        if should_post {
+            let hwnd = HWND(hwnd_value as *mut c_void);
+            if let Err(err) = unsafe {
+                PostMessageW(
+                    Some(hwnd),
+                    PAIRING_CONFIRMATION_MESSAGE,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            } {
+                clear_pending_pairing_confirmation();
+                return Err(err.into());
+            }
+        }
+        receiver
+            .recv()
+            .map_err(|_| anyhow!("pairing confirmation response channel closed"))?
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn pending_pairing_confirmation() -> &'static Mutex<PendingPairingConfirmation> {
+        PENDING_PAIRING_CONFIRMATION
+            .get_or_init(|| Mutex::new(PendingPairingConfirmation::default()))
+    }
+
+    fn queue_pairing_confirmation(
+        request: PairingConfirmationRequest,
+        responder: Sender<Result<(), String>>,
+    ) -> Result<bool> {
+        let mut pending = pending_pairing_confirmation()
+            .lock()
+            .map_err(|_| anyhow!("pending pairing confirmation mutex was poisoned"))?;
+        let replaced_pending_request = pending.request.is_some() || pending.responder.is_some();
+        if let Some(previous) = pending.responder.take() {
+            let _ = previous.send(Err("superseded by a newer pairing request".to_string()));
+        }
+        pending.request = Some(request);
+        pending.responder = Some(responder);
+        // A toast can expire while the pending confirmation stays active, so
+        // replacing it must post another window message to show a fresh toast.
+        if pending.message_posted && !replaced_pending_request {
+            return Ok(false);
+        }
+        pending.message_posted = true;
+        Ok(true)
+    }
+
+    fn take_pending_pairing_confirmation(
+    ) -> Option<(PairingConfirmationRequest, Sender<Result<(), String>>)> {
+        let Ok(mut pending) = pending_pairing_confirmation().lock() else {
+            return None;
+        };
+        pending.message_posted = false;
+        Some((pending.request.take()?, pending.responder.take()?))
+    }
+
+    fn clear_pending_pairing_confirmation() {
+        if let Ok(mut pending) = pending_pairing_confirmation().lock() {
+            pending.message_posted = false;
+            pending.request = None;
+            if let Some(responder) = pending.responder.take() {
+                let _ = responder.send(Err("pairing confirmation was cancelled".to_string()));
+            }
+        }
+    }
+
+    fn has_pending_pairing_confirmation() -> bool {
+        pending_pairing_confirmation()
+            .lock()
+            .is_ok_and(|pending| pending.request.is_some())
+    }
+
+    fn show_pending_pairing_confirmation(hwnd: HWND) {
+        let Some((request, responder)) = take_pending_pairing_confirmation() else {
+            return;
+        };
+        let _ = clear_pairing_notification(hwnd);
+        let result = match confirm_pairing_request_owned(
+            &PairingConfirmationModel {
+                confirmation_code: request.confirmation_code,
+                client_label: request.client_label,
+            },
+            hwnd,
+        ) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("pairing confirmation was rejected".to_string()),
+            Err(err) => {
+                let message = format!("Failed to show pairing confirmation:\n\n{err}");
+                let _ = show_error_window(&message);
+                Err(err.to_string())
+            }
+        };
+        let _ = responder.send(result);
     }
 
     fn show_context_menu(hwnd: HWND) {
@@ -495,6 +638,24 @@ mod windows_tray {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect()
+    }
+
+    fn show_pairing_confirmation_notification(hwnd: HWND) -> Result<()> {
+        let _ = clear_pairing_notification(hwnd);
+        let mut data = notify_icon_data(hwnd);
+        data.uFlags = NIF_INFO | NIF_REALTIME;
+        data.dwInfoFlags = NIIF_INFO;
+        data.Anonymous.uTimeout = 10_000;
+        write_wide(&mut data.szInfoTitle, "Pairing requested");
+        write_wide(
+            &mut data.szInfo,
+            "Click to choose the code shown on your client.",
+        );
+
+        if !unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool() {
+            return Err(windows::core::Error::from_thread().into());
+        }
+        Ok(())
     }
 
     fn show_pairing_notification(hwnd: HWND, notification: &PairingNotification) -> Result<()> {

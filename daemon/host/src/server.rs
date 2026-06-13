@@ -1,9 +1,10 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -31,7 +32,7 @@ use wgo_daemon_core::rpc::{
     DirectorySubscriptionCloseReason, DirectoryTableEvent, FsEntry, ProcId, ReadFileChunk,
     ReadFileReq, RenamePathsReq, RenewClientCredentialResponse, RootEntryKey,
     RootsSubscriptionCloseReason, RootsTableEvent, RpcErrorCode, RpcErrorPayload,
-    StartPairingResponse, WriteFileReq,
+    StartPairingRequest, StartPairingResponse, WriteFileReq,
 };
 use wgo_daemon_core::traits::{FileService, ServiceError};
 use wgo_daemon_core::wire::{
@@ -52,10 +53,44 @@ const READ_FILE_CHUNK_SIZE: usize = 64 * 1024;
 
 type SharedSystemConfig = Arc<Mutex<SystemConfig>>;
 type SharedClientCredentials = Arc<Mutex<ClientCredentials>>;
-type SharedPairingChallenge = Arc<Mutex<Option<PairingRecord>>>;
+type RpcSessionId = u64;
+type PairingAttemptId = u64;
+type SharedPairingChallenge = Arc<Mutex<PairingState>>;
 type SharedRpcSessionState = Arc<Mutex<RpcSessionState>>;
 type SharedFileService = Arc<dyn FileService>;
 type SharedPairingNotifier = Arc<dyn PairingNotifier>;
+
+static NEXT_RPC_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PairingAttemptKey {
+    ClientId(String),
+    Anonymous,
+}
+
+#[derive(Debug, Default)]
+struct PairingState {
+    next_attempt_id: PairingAttemptId,
+    current_attempts: HashMap<PairingAttemptKey, PairingAttemptId>,
+    active_challenge: Option<ActivePairingChallenge>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActivePairingChallenge {
+    attempt_id: PairingAttemptId,
+    attempt_key: PairingAttemptKey,
+    owner_session_id: RpcSessionId,
+    record: PairingRecord,
+    client_label: String,
+    client_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingConfirmationRequest {
+    pub daemon_url: String,
+    pub confirmation_code: String,
+    pub client_label: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingCodeNotification {
@@ -65,6 +100,11 @@ pub struct PairingCodeNotification {
 }
 
 pub trait PairingNotifier: Send + Sync {
+    fn confirm_pairing_request(
+        &self,
+        request: PairingConfirmationRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
+
     fn notify_pairing_code(
         &self,
         notification: PairingCodeNotification,
@@ -73,6 +113,7 @@ pub trait PairingNotifier: Send + Sync {
 
 #[derive(Default)]
 struct RpcSessionState {
+    session_id: RpcSessionId,
     authenticated_client_id: Option<String>,
 }
 
@@ -124,7 +165,7 @@ async fn run_system_server_once(
     let client_credentials = Arc::new(Mutex::new(load_client_credentials_or_default(
         &credentials_path,
     )?));
-    let pairing_challenge = Arc::new(Mutex::new(None));
+    let pairing_challenge = Arc::new(Mutex::new(PairingState::default()));
 
     let resolver = Arc::new(ReloadingCertResolver::new(certificate.certified_key));
     let mut server = build_reloadable_server(addr, provider.clone(), resolver.clone())?;
@@ -689,7 +730,10 @@ async fn run_rpc_session(
     files: SharedFileService,
     pairing_notifier: Option<SharedPairingNotifier>,
 ) -> Result<()> {
-    let session_state = Arc::new(Mutex::new(RpcSessionState::default()));
+    let session_state = Arc::new(Mutex::new(RpcSessionState {
+        session_id: next_rpc_session_id(),
+        authenticated_client_id: None,
+    }));
     loop {
         tokio::select! {
             stream = session.accept_bi() => {
@@ -1434,6 +1478,33 @@ async fn handle_rpc_messages(
             ok_payload_message(proc_id, DaemonInfo::current().encode())
         }
         id if id == ProcId::StartPairing.as_u64() => {
+            let Some(payload) = payload else {
+                return Ok(vec![error_message(
+                    proc_id,
+                    "failed",
+                    "StartPairing requires a payload",
+                )]);
+            };
+            let request = match StartPairingRequest::decode(payload) {
+                Ok(request) => request,
+                Err(_) => {
+                    return Ok(vec![generic_error_message(
+                        proc_id,
+                        RpcErrorCode::MalformedPayload,
+                        "StartPairing payload is malformed",
+                    )]);
+                }
+            };
+            let Some(confirmation_code) = normalize_confirmation_code(&request.confirmation_code)
+            else {
+                return Ok(vec![generic_error_message(
+                    proc_id,
+                    RpcErrorCode::MalformedPayload,
+                    "StartPairing confirmationCode must be two ASCII digits",
+                )]);
+            };
+            let client_label = pairing_client_label(&request.client_label);
+            let requested_client_id = normalize_pairing_client_id(request.client_id.as_deref());
             let Some(notifier) = pairing_notifier.as_ref() else {
                 return Ok(vec![error_message(
                     proc_id,
@@ -1441,12 +1512,67 @@ async fn handle_rpc_messages(
                     "daemon failed to start pairing",
                 )]);
             };
-            let now = now_unix();
+            let current_session_id = rpc_session_id(&session_state).await;
+            let attempt_key = pairing_attempt_key(requested_client_id.as_deref());
+            let attempt_id = begin_pairing_attempt(&pairing_challenge, attempt_key.clone()).await;
             let config = load_runtime_config(config_path, &config_state).await?;
-            let pairing = create_pairing_code(now);
             let daemon_url = pairing_daemon_url(&config);
+            if let Err(err) = notifier
+                .confirm_pairing_request(PairingConfirmationRequest {
+                    daemon_url: daemon_url.clone(),
+                    confirmation_code,
+                    client_label: client_label.clone(),
+                })
+                .await
+            {
+                warn!(?err, "local pairing confirmation was rejected");
+                let mut state = pairing_challenge.lock().await;
+                if state
+                    .current_attempts
+                    .get(&attempt_key)
+                    .is_some_and(|current| *current == attempt_id)
+                {
+                    state.current_attempts.remove(&attempt_key);
+                }
+                return Ok(vec![error_message(
+                    proc_id,
+                    "failed",
+                    "daemon failed to confirm pairing",
+                )]);
+            }
+            if !is_current_pairing_attempt(&pairing_challenge, &attempt_key, attempt_id).await {
+                return Ok(vec![error_message(
+                    proc_id,
+                    "failed",
+                    "pairing request was superseded",
+                )]);
+            }
+
+            let now = now_unix();
+            let pairing = create_pairing_code(now);
             let pairing_code_expires_at_unix = pairing.record.expires_at_unix;
-            *pairing_challenge.lock().await = Some(pairing.record);
+            {
+                let mut state = pairing_challenge.lock().await;
+                if !state
+                    .current_attempts
+                    .get(&attempt_key)
+                    .is_some_and(|current| *current == attempt_id)
+                {
+                    return Ok(vec![error_message(
+                        proc_id,
+                        "failed",
+                        "pairing request was superseded",
+                    )]);
+                }
+                state.active_challenge = Some(ActivePairingChallenge {
+                    attempt_id,
+                    attempt_key: attempt_key.clone(),
+                    owner_session_id: current_session_id,
+                    record: pairing.record,
+                    client_label,
+                    client_id: requested_client_id,
+                });
+            }
 
             let notification = PairingCodeNotification {
                 daemon_url,
@@ -1455,7 +1581,13 @@ async fn handle_rpc_messages(
             };
             if let Err(err) = notifier.notify_pairing_code(notification).await {
                 warn!(?err, "failed to notify local pairing UI");
-                *pairing_challenge.lock().await = None;
+                let mut state = pairing_challenge.lock().await;
+                if state.active_challenge.as_ref().is_some_and(|challenge| {
+                    challenge.attempt_key == attempt_key && challenge.attempt_id == attempt_id
+                }) {
+                    state.active_challenge = None;
+                    state.current_attempts.remove(&attempt_key);
+                }
                 return Ok(vec![error_message(
                     proc_id,
                     "failed",
@@ -1489,39 +1621,51 @@ async fn handle_rpc_messages(
                 }
             };
             let now = now_unix();
-            let Some(pairing) = pairing_challenge.lock().await.clone() else {
-                return Ok(vec![error_message(
-                    proc_id,
-                    "pairing_not_started",
-                    "create a local pairing code before completing pairing",
-                )]);
+            let current_session_id = rpc_session_id(&session_state).await;
+            let pairing = {
+                let mut state = pairing_challenge.lock().await;
+                let Some(pairing) = state.active_challenge.as_ref() else {
+                    return Ok(vec![error_message(
+                        proc_id,
+                        "pairing_not_started",
+                        "create a local pairing code before completing pairing",
+                    )]);
+                };
+                if pairing.owner_session_id != current_session_id {
+                    return Ok(vec![error_message(
+                        proc_id,
+                        "pairing_not_started",
+                        "start pairing on this session before completing pairing",
+                    )]);
+                }
+                if now >= pairing.record.expires_at_unix {
+                    let attempt_key = pairing.attempt_key.clone();
+                    state.active_challenge = None;
+                    state.current_attempts.remove(&attempt_key);
+                    return Ok(vec![error_message(
+                        proc_id,
+                        "pairing_expired",
+                        "pairing code expired",
+                    )]);
+                }
+                if !verify_pairing_code(&pairing.record, request.code.trim(), now) {
+                    return Ok(vec![error_message(
+                        proc_id,
+                        "invalid_pairing_code",
+                        "pairing code is invalid",
+                    )]);
+                }
+                let pairing = state
+                    .active_challenge
+                    .take()
+                    .expect("active pairing challenge exists after validation");
+                state.current_attempts.remove(&pairing.attempt_key);
+                pairing
             };
-            if now >= pairing.expires_at_unix {
-                *pairing_challenge.lock().await = None;
-                return Ok(vec![error_message(
-                    proc_id,
-                    "pairing_expired",
-                    "pairing code expired",
-                )]);
-            }
-            if !verify_pairing_code(&pairing, request.code.trim(), now) {
-                return Ok(vec![error_message(
-                    proc_id,
-                    "invalid_pairing_code",
-                    "pairing code is invalid",
-                )]);
-            }
 
             let mut state =
                 load_runtime_client_credentials(credentials_path, &client_credentials).await?;
-            let label = request.client_label.trim();
-            let label = if label.is_empty() { "browser" } else { label };
-            let requested_client_id = request
-                .client_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|client_id| !client_id.is_empty());
-            let existing_record = requested_client_id.and_then(|client_id| {
+            let existing_record = pairing.client_id.as_deref().and_then(|client_id| {
                 state
                     .clients
                     .iter()
@@ -1529,15 +1673,14 @@ async fn handle_rpc_messages(
                     .cloned()
             });
             let issued = match existing_record {
-                Some(record) => reissue_client_secret(&record, label, now),
-                None => issue_client_secret(label, now),
+                Some(record) => reissue_client_secret(&record, &pairing.client_label, now),
+                None => issue_client_secret(&pairing.client_label, now),
             };
             let client_id = issued.client_id.clone();
             let client_credential_expires_at_unix = issued.record.expires_at_unix;
             state.clients.retain(|record| record.client_id != client_id);
             state.clients.push(issued.record);
             store_runtime_client_credentials(credentials_path, &client_credentials, state).await?;
-            *pairing_challenge.lock().await = None;
 
             ok_payload_message(
                 proc_id,
@@ -1699,6 +1842,54 @@ async fn authenticated_client_id(session_state: &SharedRpcSessionState) -> Optio
     session_state.lock().await.authenticated_client_id.clone()
 }
 
+async fn rpc_session_id(session_state: &SharedRpcSessionState) -> RpcSessionId {
+    session_state.lock().await.session_id
+}
+
+async fn begin_pairing_attempt(
+    pairing_state: &SharedPairingChallenge,
+    attempt_key: PairingAttemptKey,
+) -> PairingAttemptId {
+    let mut state = pairing_state.lock().await;
+    state.next_attempt_id += 1;
+    let attempt_id = state.next_attempt_id;
+    state
+        .current_attempts
+        .insert(attempt_key.clone(), attempt_id);
+    if state
+        .active_challenge
+        .as_ref()
+        .is_some_and(|challenge| challenge.attempt_key == attempt_key)
+    {
+        state.active_challenge = None;
+    }
+    attempt_id
+}
+
+async fn is_current_pairing_attempt(
+    pairing_state: &SharedPairingChallenge,
+    attempt_key: &PairingAttemptKey,
+    attempt_id: PairingAttemptId,
+) -> bool {
+    pairing_state
+        .lock()
+        .await
+        .current_attempts
+        .get(attempt_key)
+        .is_some_and(|current| *current == attempt_id)
+}
+
+fn pairing_attempt_key(client_id: Option<&str>) -> PairingAttemptKey {
+    match client_id {
+        Some(client_id) => PairingAttemptKey::ClientId(client_id.to_string()),
+        None => PairingAttemptKey::Anonymous,
+    }
+}
+
+fn next_rpc_session_id() -> RpcSessionId {
+    NEXT_RPC_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 async fn verify_session_credentials(
     credential: &PairedSecretCredential,
     client_credentials: &SharedClientCredentials,
@@ -1749,6 +1940,30 @@ fn unauthorized_message(proc_id: u64) -> ReqResMessage {
 
 fn now_unix() -> i64 {
     OffsetDateTime::now_utc().unix_timestamp()
+}
+
+fn normalize_confirmation_code(raw: &str) -> Option<String> {
+    let code = raw.trim();
+    if code.len() == 2 && code.bytes().all(|byte| byte.is_ascii_digit()) {
+        Some(code.to_string())
+    } else {
+        None
+    }
+}
+
+fn pairing_client_label(raw: &str) -> String {
+    let label = raw.trim();
+    if label.is_empty() {
+        "browser".to_string()
+    } else {
+        label.to_string()
+    }
+}
+
+fn normalize_pairing_client_id(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|client_id| !client_id.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn pairing_daemon_url(config: &SystemConfig) -> String {
@@ -1995,17 +2210,11 @@ mod tests {
 
         let config_state = Arc::new(Mutex::new(SystemConfig::default()));
         let client_credentials = Arc::new(Mutex::new(ClientCredentials::default()));
-        let pairing_challenge = test_pairing_challenge_with(pairing.record.clone());
+        let pairing_challenge =
+            test_pairing_challenge_with_label(pairing.record.clone(), "test-browser", None);
         let request = request_message(
             ProcId::CompletePairing,
-            Some(
-                CompletePairingRequest {
-                    code: pairing.code,
-                    client_label: "test-browser".to_string(),
-                    client_id: None,
-                }
-                .encode(),
-            ),
+            Some(CompletePairingRequest { code: pairing.code }.encode()),
         );
         let session_state = Arc::new(Mutex::new(RpcSessionState::default()));
         let responses = handle_rpc_messages(
@@ -2027,7 +2236,7 @@ mod tests {
         assert!(matches!(response, ReqResMessage::ResponseUnaryOk { .. }));
         let credentials = CompletePairingResponse::decode(payload(response)).unwrap();
         let stored = load_client_credentials_or_default(&credentials_path).unwrap();
-        assert_eq!(*pairing_challenge.lock().await, None);
+        assert_eq!(active_pairing_challenge(&pairing_challenge).await, None);
         assert_eq!(stored.clients.len(), 1);
         assert_eq!(
             stored.clients[0].expires_at_unix,
@@ -2062,17 +2271,14 @@ mod tests {
 
         let config_state = Arc::new(Mutex::new(SystemConfig::default()));
         let client_credentials = Arc::new(Mutex::new(ClientCredentials::default()));
-        let pairing_challenge = test_pairing_challenge_with(pairing.record.clone());
+        let pairing_challenge = test_pairing_challenge_with_label(
+            pairing.record.clone(),
+            "test-browser",
+            Some(existing_client_id.clone()),
+        );
         let request = request_message(
             ProcId::CompletePairing,
-            Some(
-                CompletePairingRequest {
-                    code: pairing.code,
-                    client_label: "test-browser".to_string(),
-                    client_id: Some(existing_client_id.clone()),
-                }
-                .encode(),
-            ),
+            Some(CompletePairingRequest { code: pairing.code }.encode()),
         );
         let responses = handle_rpc_messages(
             vec![request],
@@ -2094,7 +2300,7 @@ mod tests {
         let credentials = CompletePairingResponse::decode(payload(response)).unwrap();
         let stored = load_client_credentials_or_default(&credentials_path).unwrap();
         assert_eq!(credentials.client_id, existing_client_id);
-        assert_eq!(*pairing_challenge.lock().await, None);
+        assert_eq!(active_pairing_challenge(&pairing_challenge).await, None);
         assert_eq!(stored.clients.len(), 1);
         assert_eq!(stored.clients[0].client_id, existing_client_id);
         assert_eq!(stored.clients[0].created_at_unix, existing_created_at_unix);
@@ -2125,18 +2331,12 @@ mod tests {
             },
         )
         .unwrap();
-        let pairing_challenge = test_pairing_challenge_with(pairing.record.clone());
+        let pairing_challenge =
+            test_pairing_challenge_with_label(pairing.record.clone(), "test-browser", None);
 
         let request = request_message(
             ProcId::CompletePairing,
-            Some(
-                CompletePairingRequest {
-                    code: pairing.code,
-                    client_label: "test-browser".to_string(),
-                    client_id: None,
-                }
-                .encode(),
-            ),
+            Some(CompletePairingRequest { code: pairing.code }.encode()),
         );
         let responses = handle_rpc_messages(
             vec![request],
@@ -2157,7 +2357,7 @@ mod tests {
         assert!(matches!(response, ReqResMessage::ResponseUnaryOk { .. }));
         let credentials = CompletePairingResponse::decode(payload(response)).unwrap();
         let stored = load_client_credentials_or_default(&credentials_path).unwrap();
-        assert_eq!(*pairing_challenge.lock().await, None);
+        assert_eq!(active_pairing_challenge(&pairing_challenge).await, None);
         assert_ne!(credentials.client_id, existing_client_id);
         assert_eq!(stored.clients.len(), 2);
         assert!(stored
@@ -2175,6 +2375,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_pairing_rejects_matching_code_from_different_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("wgo.yaml");
+        let credentials_path = client_credentials_path(&config_path);
+        let pairing = create_pairing_code(now_unix());
+        save(&config_path, &SystemConfig::default()).unwrap();
+
+        let pairing_challenge = test_pairing_challenge_with_session(7, pairing.record.clone());
+        let request = request_message(
+            ProcId::CompletePairing,
+            Some(CompletePairingRequest { code: pairing.code }.encode()),
+        );
+        let responses = handle_rpc_messages(
+            vec![request],
+            &config_path,
+            &credentials_path,
+            Arc::new(Mutex::new(SystemConfig::default())),
+            Arc::new(Mutex::new(ClientCredentials::default())),
+            pairing_challenge.clone(),
+            test_session_state(8),
+            test_files(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(responses.len(), 1);
+        assert!(matches!(
+            responses[0],
+            ReqResMessage::ResponseUnaryError {
+                error_kind: RpcErrorKind::Method,
+                ..
+            }
+        ));
+        let Value::Array(error_items) = Value::decode(error(&responses[0])).unwrap() else {
+            panic!("expected method error union");
+        };
+        assert_eq!(error_items.first(), Some(&Value::U64(1)));
+        let stored = load_client_credentials_or_default(&credentials_path).unwrap();
+        assert_eq!(stored.clients.len(), 0);
+        let active = active_pairing_challenge(&pairing_challenge).await.unwrap();
+        assert_eq!(active.owner_session_id, 7);
+        assert_eq!(active.record, pairing.record);
+        assert_eq!(active.client_label, "browser");
+        assert_eq!(active.client_id, None);
+    }
+
+    #[tokio::test]
     async fn start_pairing_creates_runtime_pairing_code() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("wgo.yaml");
@@ -2186,7 +2434,7 @@ mod tests {
         let pairing_challenge = test_pairing_challenge();
         let notifier = RecordingPairingNotifier::default();
         let responses = handle_rpc_messages(
-            vec![request_message(ProcId::StartPairing, None)],
+            vec![start_pairing_request_message("42")],
             &config_path,
             &credentials_path,
             config_state,
@@ -2212,8 +2460,10 @@ mod tests {
         };
         let stored = load_client_credentials_or_default(&credentials_path).unwrap();
         assert_eq!(stored.clients.len(), 0);
-        let pairing = pairing_challenge.lock().await.clone().unwrap();
-        assert_eq!(pairing_code_expires_at_unix, pairing.expires_at_unix);
+        let pairing = active_pairing_challenge(&pairing_challenge).await.unwrap();
+        assert_eq!(pairing_code_expires_at_unix, pairing.record.expires_at_unix);
+        assert_eq!(pairing.client_label, "test-browser");
+        assert_eq!(pairing.client_id, Some("existing-client".to_string()));
         assert_eq!(client_credentials.lock().await.clients.len(), 0);
     }
 
@@ -2227,7 +2477,7 @@ mod tests {
         let notifier = RecordingPairingNotifier::default();
         let pairing_challenge = test_pairing_challenge();
         let responses = handle_rpc_messages(
-            vec![request_message(ProcId::StartPairing, None)],
+            vec![start_pairing_request_message("42")],
             &config_path,
             &credentials_path,
             Arc::new(Mutex::new(SystemConfig::default())),
@@ -2246,17 +2496,102 @@ mod tests {
         ));
         let stored = load_client_credentials_or_default(&credentials_path).unwrap();
         assert_eq!(stored.clients.len(), 0);
-        let pairing = pairing_challenge.lock().await.clone().unwrap();
+        let pairing = active_pairing_challenge(&pairing_challenge).await.unwrap();
+        let confirmations = notifier.confirmations.lock().unwrap();
+        assert_eq!(confirmations.len(), 1);
+        assert_eq!(confirmations[0].daemon_url, "https://localhost:9012");
+        assert_eq!(confirmations[0].confirmation_code, "42");
+        assert_eq!(confirmations[0].client_label, "test-browser");
+        drop(confirmations);
         let notifications = notifier.notifications.lock().unwrap();
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].daemon_url, "https://localhost:9012");
         assert!(verify_pairing_code(
-            &pairing,
+            &pairing.record,
             &notifications[0].pairing_code,
             now_unix()
         ));
         assert!(notifications[0].expires_in_seconds > 0);
         assert!(notifications[0].expires_in_seconds <= PAIRING_TTL_SECONDS);
+    }
+
+    #[tokio::test]
+    async fn newer_start_pairing_supersedes_pending_attempt_for_same_client_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("wgo.yaml");
+        let credentials_path = client_credentials_path(&config_path);
+        save(&config_path, &SystemConfig::default()).unwrap();
+
+        let pairing_challenge = test_pairing_challenge();
+        let config_state = Arc::new(Mutex::new(SystemConfig::default()));
+        let client_credentials = Arc::new(Mutex::new(ClientCredentials::default()));
+        let (notifier, first_started, release_first) = BlockingFirstPairingNotifier::new();
+        let first_config_path = config_path.clone();
+        let first_credentials_path = credentials_path.clone();
+        let first_pairing_challenge = pairing_challenge.clone();
+        let first_config_state = config_state.clone();
+        let first_client_credentials = client_credentials.clone();
+        let first_notifier = notifier.clone();
+        let first_task = tokio::spawn(async move {
+            handle_rpc_messages(
+                vec![start_pairing_request_message("42")],
+                &first_config_path,
+                &first_credentials_path,
+                first_config_state,
+                first_client_credentials,
+                first_pairing_challenge,
+                test_session_state(1),
+                test_files(),
+                Some(Arc::new(first_notifier)),
+            )
+            .await
+            .unwrap()
+        });
+        first_started.await.unwrap();
+
+        let second_responses = handle_rpc_messages(
+            vec![start_pairing_request_message("43")],
+            &config_path,
+            &credentials_path,
+            config_state,
+            client_credentials,
+            pairing_challenge.clone(),
+            test_session_state(2),
+            test_files(),
+            Some(Arc::new(notifier.clone())),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            second_responses.first(),
+            Some(ReqResMessage::ResponseUnaryOk { .. })
+        ));
+
+        release_first.send(()).unwrap();
+        let first_responses = first_task.await.unwrap();
+        assert!(matches!(
+            first_responses.first(),
+            Some(ReqResMessage::ResponseUnaryError {
+                error_kind: RpcErrorKind::Method,
+                ..
+            })
+        ));
+
+        let confirmations = notifier.confirmations.lock().unwrap();
+        assert_eq!(confirmations.len(), 2);
+        assert_eq!(confirmations[0].confirmation_code, "42");
+        assert_eq!(confirmations[1].confirmation_code, "43");
+        drop(confirmations);
+
+        let notifications = notifier.notifications.lock().unwrap();
+        assert_eq!(notifications.len(), 1);
+        let active = active_pairing_challenge(&pairing_challenge).await.unwrap();
+        assert_eq!(active.owner_session_id, 2);
+        assert!(verify_pairing_code(
+            &active.record,
+            &notifications[0].pairing_code,
+            now_unix()
+        ));
     }
 
     #[tokio::test]
@@ -2268,7 +2603,7 @@ mod tests {
         let pairing_challenge = test_pairing_challenge();
 
         let responses = handle_rpc_messages(
-            vec![request_message(ProcId::StartPairing, None)],
+            vec![start_pairing_request_message("42")],
             &config_path,
             &credentials_path,
             Arc::new(Mutex::new(SystemConfig::default())),
@@ -2294,7 +2629,7 @@ mod tests {
             panic!("expected method error union");
         };
         assert_eq!(error_items.first(), Some(&Value::U64(0)));
-        assert_eq!(*pairing_challenge.lock().await, None);
+        assert_eq!(active_pairing_challenge(&pairing_challenge).await, None);
     }
 
     #[tokio::test]
@@ -2540,6 +2875,7 @@ mod tests {
         )
         .unwrap();
         let session_state = Arc::new(Mutex::new(RpcSessionState {
+            session_id: 0,
             authenticated_client_id: Some(client_id.clone()),
         }));
 
@@ -2587,20 +2923,154 @@ mod tests {
         }
     }
 
-    fn test_pairing_challenge() -> SharedPairingChallenge {
-        Arc::new(Mutex::new(None))
+    fn start_pairing_request_message(confirmation_code: &str) -> ReqResMessage {
+        request_message(
+            ProcId::StartPairing,
+            Some(
+                StartPairingRequest {
+                    confirmation_code: confirmation_code.to_string(),
+                    client_label: "test-browser".to_string(),
+                    client_id: Some("existing-client".to_string()),
+                }
+                .encode(),
+            ),
+        )
     }
 
-    fn test_pairing_challenge_with(record: PairingRecord) -> SharedPairingChallenge {
-        Arc::new(Mutex::new(Some(record)))
+    fn test_pairing_challenge() -> SharedPairingChallenge {
+        Arc::new(Mutex::new(PairingState::default()))
+    }
+
+    fn test_pairing_challenge_with_label(
+        record: PairingRecord,
+        client_label: &str,
+        client_id: Option<String>,
+    ) -> SharedPairingChallenge {
+        Arc::new(Mutex::new(PairingState {
+            next_attempt_id: 1,
+            current_attempts: HashMap::new(),
+            active_challenge: Some(ActivePairingChallenge {
+                attempt_id: 1,
+                attempt_key: pairing_attempt_key(client_id.as_deref()),
+                owner_session_id: 0,
+                record,
+                client_label: client_label.to_string(),
+                client_id,
+            }),
+        }))
+    }
+
+    fn test_pairing_challenge_with_session(
+        owner_session_id: RpcSessionId,
+        record: PairingRecord,
+    ) -> SharedPairingChallenge {
+        Arc::new(Mutex::new(PairingState {
+            next_attempt_id: 1,
+            current_attempts: HashMap::new(),
+            active_challenge: Some(ActivePairingChallenge {
+                attempt_id: 1,
+                attempt_key: PairingAttemptKey::Anonymous,
+                owner_session_id,
+                record,
+                client_label: "browser".to_string(),
+                client_id: None,
+            }),
+        }))
+    }
+
+    async fn active_pairing_challenge(
+        pairing_challenge: &SharedPairingChallenge,
+    ) -> Option<ActivePairingChallenge> {
+        pairing_challenge.lock().await.active_challenge.clone()
+    }
+
+    fn test_session_state(session_id: RpcSessionId) -> SharedRpcSessionState {
+        Arc::new(Mutex::new(RpcSessionState {
+            session_id,
+            authenticated_client_id: None,
+        }))
     }
 
     #[derive(Clone, Default)]
     struct RecordingPairingNotifier {
+        confirmations: Arc<std::sync::Mutex<Vec<PairingConfirmationRequest>>>,
         notifications: Arc<std::sync::Mutex<Vec<PairingCodeNotification>>>,
     }
 
     impl PairingNotifier for RecordingPairingNotifier {
+        fn confirm_pairing_request(
+            &self,
+            request: PairingConfirmationRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+            let confirmations = self.confirmations.clone();
+            Box::pin(async move {
+                confirmations.lock().unwrap().push(request);
+                Ok(())
+            })
+        }
+
+        fn notify_pairing_code(
+            &self,
+            notification: PairingCodeNotification,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+            let notifications = self.notifications.clone();
+            Box::pin(async move {
+                notifications.lock().unwrap().push(notification);
+                Ok(())
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct BlockingFirstPairingNotifier {
+        confirmations: Arc<std::sync::Mutex<Vec<PairingConfirmationRequest>>>,
+        notifications: Arc<std::sync::Mutex<Vec<PairingCodeNotification>>>,
+        first_started: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+        first_release: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
+    }
+
+    impl BlockingFirstPairingNotifier {
+        fn new() -> (
+            Self,
+            tokio::sync::oneshot::Receiver<()>,
+            tokio::sync::oneshot::Sender<()>,
+        ) {
+            let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+            let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+            (
+                Self {
+                    confirmations: Arc::new(std::sync::Mutex::new(Vec::new())),
+                    notifications: Arc::new(std::sync::Mutex::new(Vec::new())),
+                    first_started: Arc::new(std::sync::Mutex::new(Some(started_sender))),
+                    first_release: Arc::new(Mutex::new(Some(release_receiver))),
+                },
+                started_receiver,
+                release_sender,
+            )
+        }
+    }
+
+    impl PairingNotifier for BlockingFirstPairingNotifier {
+        fn confirm_pairing_request(
+            &self,
+            request: PairingConfirmationRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+            let confirmations = self.confirmations.clone();
+            let first_started = self.first_started.clone();
+            let first_release = self.first_release.clone();
+            Box::pin(async move {
+                confirmations.lock().unwrap().push(request);
+                let release = first_release.lock().await.take();
+                if let Some(release) = release {
+                    if let Some(started) = first_started.lock().unwrap().take() {
+                        let _ = started.send(());
+                    }
+                    let _ = release.await;
+                }
+                Ok(())
+            })
+        }
+
         fn notify_pairing_code(
             &self,
             notification: PairingCodeNotification,

@@ -297,6 +297,35 @@ fn parse_u32(value: &str) -> Option<u32> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartPairingRequest {
+    pub confirmation_code: String,
+    pub client_label: String,
+    pub client_id: Option<String>,
+}
+
+impl StartPairingRequest {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut fields = BTreeMap::from([
+            (1, Value::Text(self.confirmation_code.clone())),
+            (2, Value::Text(self.client_label.clone())),
+        ]);
+        if let Some(client_id) = &self.client_id {
+            fields.insert(3, Value::Text(client_id.clone()));
+        }
+        Value::Map(fields).encode()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, RpcCodecError> {
+        let map = expect_map(Value::decode(bytes)?)?;
+        Ok(Self {
+            confirmation_code: expect_text(&map, 1)?,
+            client_label: expect_text(&map, 2)?,
+            client_id: optional_text(&map, 3)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartPairingResponse {
     pub pairing_code_expires_at_unix: i64,
 }
@@ -314,28 +343,17 @@ impl StartPairingResponse {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletePairingRequest {
     pub code: String,
-    pub client_label: String,
-    pub client_id: Option<String>,
 }
 
 impl CompletePairingRequest {
     pub fn encode(&self) -> Vec<u8> {
-        let mut fields = BTreeMap::from([
-            (1, Value::Text(self.code.clone())),
-            (2, Value::Text(self.client_label.clone())),
-        ]);
-        if let Some(client_id) = &self.client_id {
-            fields.insert(3, Value::Text(client_id.clone()));
-        }
-        Value::Map(fields).encode()
+        Value::Map(BTreeMap::from([(1, Value::Text(self.code.clone()))])).encode()
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, RpcCodecError> {
         let map = expect_map(Value::decode(bytes)?)?;
         Ok(Self {
             code: expect_text(&map, 1)?,
-            client_label: expect_text(&map, 2)?,
-            client_id: optional_text(&map, 3)?,
         })
     }
 }
@@ -1234,10 +1252,18 @@ mod tests {
 
     #[test]
     fn complete_pairing_roundtrip() {
-        let request = CompletePairingRequest {
-            code: "123456".to_string(),
+        let request = StartPairingRequest {
+            confirmation_code: "42".to_string(),
             client_label: "browser".to_string(),
             client_id: Some("client".to_string()),
+        };
+        assert_eq!(
+            StartPairingRequest::decode(&request.encode()).unwrap(),
+            request
+        );
+
+        let request = CompletePairingRequest {
+            code: "123456".to_string(),
         };
         assert_eq!(
             CompletePairingRequest::decode(&request.encode()).unwrap(),

@@ -45,6 +45,19 @@ const dangerActionClassName = [
   "border-[#f6c2bd] bg-[#fff4f2] text-[#b42318]",
   "hover:border-[#f04438] hover:bg-[#fff2f0] hover:text-[#912018]",
 ].join(" ");
+const pairingControlClassName = [
+  "flex items-center justify-between gap-[12px] rounded-[8px]",
+  "border border-[#d8dde7] bg-[#f7f8fb] px-[10px] py-[8px]",
+].join(" ");
+const pairingStepClassName = [
+  "grid min-h-[174px] place-items-center gap-[10px] rounded-[8px]",
+  "border border-[#d8dde7] bg-white px-[16px] py-[18px] text-center",
+].join(" ");
+const confirmationCodeClassName = [
+  "grid h-[96px] min-w-[156px] place-items-center rounded-[8px]",
+  "border border-[#cfd6e3] bg-[#f7f8fb] px-[18px]",
+  "font-800 text-[#20242d] text-[56px] leading-none tracking-[0]",
+].join(" ");
 
 interface MachineModalProps {
   baseUrl: string;
@@ -61,6 +74,7 @@ interface MachineModalProps {
   mode: MachineModalMode;
   modalTitle: string;
   pairingCode: string;
+  pairingConfirmationCode?: string;
   pairingCodeExpiresInSeconds?: number;
   pairingCodeInputRef: React.RefObject<HTMLInputElement | null>;
   selected?: Machine;
@@ -82,6 +96,7 @@ interface PairMachineFormProps {
   isRequestingPairingCode: boolean;
   isPairing: boolean;
   pairingCode: string;
+  pairingConfirmationCode?: string;
   pairingCodeExpiresInSeconds?: number;
   pairingCodeInputRef: React.RefObject<HTMLInputElement | null>;
   selected: Machine;
@@ -89,6 +104,24 @@ interface PairMachineFormProps {
   onPairingCodeChange: (value: string) => void;
   onRequestPairingCode: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}
+
+interface PairingRestartControlProps {
+  disabled: boolean;
+  machineName: string;
+  onRequestPairingCode: () => void;
+}
+
+interface PairingConfirmationStepProps {
+  confirmationCode?: string;
+  isRequestingPairingCode: boolean;
+}
+
+interface PairingCodeStepProps {
+  pairingCode: string;
+  pairingCodeExpiresInSeconds?: number;
+  pairingCodeInputRef: React.RefObject<HTMLInputElement | null>;
+  onPairingCodeChange: (value: string) => void;
 }
 
 interface MachineConfigFormProps {
@@ -125,6 +158,7 @@ export function MachineModal(
     mode,
     modalTitle,
     pairingCode,
+    pairingConfirmationCode,
     pairingCodeExpiresInSeconds,
     pairingCodeInputRef,
     selected,
@@ -183,6 +217,7 @@ export function MachineModal(
               isRequestingPairingCode={isRequestingPairingCode}
               isPairing={isPairing}
               pairingCode={pairingCode}
+              pairingConfirmationCode={pairingConfirmationCode}
               pairingCodeExpiresInSeconds={pairingCodeExpiresInSeconds}
               pairingCodeInputRef={pairingCodeInputRef}
               selected={selected}
@@ -238,6 +273,7 @@ function PairMachineForm(
     isRequestingPairingCode,
     isPairing,
     pairingCode,
+    pairingConfirmationCode,
     pairingCodeExpiresInSeconds,
     pairingCodeInputRef,
     selected,
@@ -247,34 +283,123 @@ function PairMachineForm(
     onSubmit,
   }: PairMachineFormProps,
 ) {
-  const pairingStatus = pairingStatusText(
-    isRequestingPairingCode,
-    pairingCodeExpiresInSeconds,
-  );
+  const hasPairingCode = pairingCodeExpiresInSeconds !== undefined;
   return (
     <form className={machineModalFormClassName} onSubmit={onSubmit}>
-      <div className={modalMachineSummaryClassName}>
-        <strong>{selected.name}</strong>
-        <span>{selected.baseUrl}</span>
-      </div>
-      <div className="flex items-center justify-between gap-[12px] rounded-[8px] border border-[#d8dde7] bg-[#f7f8fb] px-[10px] py-[8px]">
-        <span className="min-w-0 text-[#475467] text-[12px]">
-          {pairingStatus}
-        </span>
-        <button
-          type="button"
-          className="min-w-[36px] px-[10px]"
-          disabled={isPairing || isRequestingPairingCode}
-          onClick={onRequestPairingCode}
-          title="Reissue pairing code"
-        >
-          {isRequestingPairingCode
-            ? <Loader2 size={16} className="animate-spin" />
-            : <RefreshCw size={16} />}
-          Reissue
+      <PairingRestartControl
+        disabled={isPairing}
+        machineName={selected.name}
+        onRequestPairingCode={onRequestPairingCode}
+      />
+      {hasPairingCode
+        ? (
+          <PairingCodeStep
+            pairingCode={pairingCode}
+            pairingCodeExpiresInSeconds={pairingCodeExpiresInSeconds}
+            pairingCodeInputRef={pairingCodeInputRef}
+            onPairingCodeChange={onPairingCodeChange}
+          />
+        )
+        : (
+          <PairingConfirmationStep
+            confirmationCode={pairingConfirmationCode}
+            isRequestingPairingCode={isRequestingPairingCode}
+          />
+        )}
+      {connection.phase === "offline"
+        ? <div className={fieldErrorClassName}>{connection.message}</div>
+        : null}
+      <div className={modalActionsClassName}>
+        <button type="button" onClick={onClose}>
+          Skip
         </button>
+        {hasPairingCode
+          ? (
+            <button
+              type="submit"
+              disabled={isPairing || isRequestingPairingCode ||
+                pairingCode.length === 0}
+            >
+              {isPairing
+                ? <Loader2 size={16} className="animate-spin" />
+                : <KeyRound size={16} />}
+              Pair
+            </button>
+          )
+          : null}
       </div>
-      <label>
+    </form>
+  );
+}
+
+function PairingRestartControl(
+  {
+    disabled,
+    machineName,
+    onRequestPairingCode,
+  }: PairingRestartControlProps,
+) {
+  return (
+    <div className={pairingControlClassName}>
+      <span className="flex min-w-0 items-center gap-[4px] text-[#475467] text-[12px]">
+        <span className="shrink-0">Pairing to</span>
+        <strong className="min-w-0 truncate font-700 text-[#20242d]">
+          {machineName}
+        </strong>
+      </span>
+      <button
+        type="button"
+        className="min-w-[36px] px-[10px]"
+        disabled={disabled}
+        onClick={onRequestPairingCode}
+        title="Restart pairing"
+      >
+        <RefreshCw size={16} />
+        Restart pairing
+      </button>
+    </div>
+  );
+}
+
+function PairingConfirmationStep(
+  { confirmationCode, isRequestingPairingCode }: PairingConfirmationStepProps,
+) {
+  return (
+    <section className={pairingStepClassName}>
+      <div className="grid justify-items-center gap-[8px]">
+        <span className="text-[#475467] text-[12px] font-700">
+          Confirmation code
+        </span>
+        <div className={confirmationCodeClassName}>
+          {confirmationCode ?? "--"}
+        </div>
+      </div>
+      <p className="m-0 max-w-[320px] text-[#667085] text-[13px] leading-[1.45]">
+        Select this code on the daemon to reveal the pairing code.
+      </p>
+      {isRequestingPairingCode
+        ? (
+          <div className="flex items-center gap-[6px] text-[#475467] text-[12px]">
+            <Loader2 size={14} className="animate-spin" />
+            Waiting for confirmation
+          </div>
+        )
+        : null}
+    </section>
+  );
+}
+
+function PairingCodeStep(
+  {
+    pairingCode,
+    pairingCodeExpiresInSeconds,
+    pairingCodeInputRef,
+    onPairingCodeChange,
+  }: PairingCodeStepProps,
+) {
+  return (
+    <section className={pairingStepClassName}>
+      <label className="w-full">
         <span>Pairing code</span>
         <input
           ref={pairingCodeInputRef}
@@ -290,42 +415,22 @@ function PairMachineForm(
           aria-label="Pairing code"
         />
       </label>
-      {connection.phase === "offline"
-        ? <div className={fieldErrorClassName}>{connection.message}</div>
+      {pairingCodeExpiresInSeconds !== undefined
+        ? pairingCodeExpiresInSeconds <= 0
+          ? (
+            <p className="m-0 text-[#b42318] text-[12px]">
+              Pairing code expired. Restart pairing.
+            </p>
+          )
+          : (
+            <p className="m-0 text-[#667085] text-[12px]">
+              Pairing code expires in{" "}
+              {formatRemainingTime(pairingCodeExpiresInSeconds)}.
+            </p>
+          )
         : null}
-      <div className={modalActionsClassName}>
-        <button type="button" onClick={onClose}>
-          Skip
-        </button>
-        <button
-          type="submit"
-          disabled={isPairing || isRequestingPairingCode ||
-            pairingCode.length === 0}
-        >
-          {isPairing
-            ? <Loader2 size={16} className="animate-spin" />
-            : <KeyRound size={16} />}
-          Pair
-        </button>
-      </div>
-    </form>
+    </section>
   );
-}
-
-function pairingStatusText(
-  isRequestingPairingCode: boolean,
-  expiresInSeconds?: number,
-): string {
-  if (isRequestingPairingCode) {
-    return "Requesting a pairing code...";
-  }
-  if (expiresInSeconds === undefined) {
-    return "Waiting for pairing code request...";
-  }
-  if (expiresInSeconds <= 0) {
-    return "Pairing code expired. Requesting a new code...";
-  }
-  return `Pairing code expires in ${formatRemainingTime(expiresInSeconds)}`;
 }
 
 function formatRemainingTime(totalSeconds: number): string {
