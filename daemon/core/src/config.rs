@@ -181,7 +181,7 @@ pub fn windows_program_data_config_path() -> PathBuf {
     let root = std::env::var_os("ProgramData")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
-    root.join("wgo").join("wgo.yaml")
+    root.join("WhatsGoingOn").join("wgo.yaml")
 }
 
 pub fn macos_system_config_path() -> PathBuf {

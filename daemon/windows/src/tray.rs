@@ -23,8 +23,12 @@ mod windows_tray {
     use anyhow::{anyhow, Result};
     use wgo_daemon_core::config::{generated_default_system_config, save};
     use windows::core::{w, PCWSTR};
-    use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+    use windows::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT,
+        POINT, WPARAM,
+    };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Threading::CreateMutexW;
     use windows::Win32::UI::Shell::{
         ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_REALTIME, NIF_TIP,
         NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_BALLOONUSERCLICK,
@@ -50,6 +54,7 @@ mod windows_tray {
     };
 
     const CLASS_NAME: PCWSTR = w!("WgoWindowsUserTrayWindow");
+    const INSTANCE_MUTEX_NAME: PCWSTR = w!("Local\\WgoWindowsUserTray");
     const WINDOW_TITLE: PCWSTR = w!("Whats Going On");
     const TRAY_MESSAGE: u32 = WM_APP + 1;
     const PAIRING_NOTIFICATION_MESSAGE: u32 = WM_APP + 2;
@@ -67,6 +72,16 @@ mod windows_tray {
 
     struct TrayRuntime {
         config_path: PathBuf,
+    }
+
+    struct SingleInstanceGuard(HANDLE);
+
+    impl Drop for SingleInstanceGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
     }
 
     #[derive(Default)]
@@ -89,6 +104,10 @@ mod windows_tray {
         OnceLock::new();
 
     pub fn run(config_path: PathBuf) -> Result<()> {
+        let Some(_single_instance_guard) = acquire_single_instance()? else {
+            return Ok(());
+        };
+
         TRAY_RUNTIME
             .set(TrayRuntime { config_path })
             .map_err(|_| anyhow!("tray runtime was already initialized"))?;
@@ -115,6 +134,17 @@ mod windows_tray {
             let _ = DestroyWindow(hwnd);
             message_result
         }
+    }
+
+    fn acquire_single_instance() -> Result<Option<SingleInstanceGuard>> {
+        let handle = unsafe { CreateMutexW(None, true, INSTANCE_MUTEX_NAME)? };
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return Ok(None);
+        }
+        Ok(Some(SingleInstanceGuard(handle)))
     }
 
     unsafe fn current_instance() -> Result<HINSTANCE> {

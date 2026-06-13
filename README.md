@@ -103,3 +103,44 @@ Run the web client:
 cd web
 deno task dev
 ```
+
+## Windows Packaging
+
+Build a Windows daemon MSIX package:
+
+```sh
+deno task windows:package:daemon
+```
+
+The script stages `wgo-windows-system.exe`, `wgo-windows-user.exe`, generated
+app icons, and an `AppxManifest.xml`, then invokes the Windows SDK
+`MakeAppx.exe` tool. By default it also creates a development code-signing
+certificate and signs the package. The generated `.cer` must be trusted on the
+test machine before the MSIX can be installed. The trust task requests elevation
+when needed:
+
+```sh
+deno task windows:trust:daemon:dev-cert
+```
+
+```powershell
+Add-AppxPackage .\dist\windows\wgo-windows-daemon-0.1.0.msix
+Start-Process 'shell:AppsFolder\Disjukr.WhatsGoingOn_fbgb9hhrc8qtr!WgoUser'
+```
+
+Install from an elevated PowerShell session because the package declares a
+LocalSystem service. The packaged startup task starts the tray app on user
+logon; launch the app once after installing if you want the tray icon
+immediately.
+
+Passing `-SkipSign` writes `wgo-windows-daemon-0.1.0.unsigned.msix` so it cannot
+accidentally replace the signed installable package.
+
+The MSIX manifest declares `wgo-windows-system.exe` as a delayed-start
+LocalSystem packaged service and `wgo-windows-user.exe` as the interactive tray
+app. Uninstalling the package removes the packaged service and app binaries.
+Daemon data under `%ProgramData%\WhatsGoingOn` is intentionally outside the
+package and is not removed by MSIX uninstall.
+
+For production signing, pass `-CertificatePath` and `-CertificatePassword` to
+`scripts/windows/package-daemon.ps1`.

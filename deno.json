@@ -5,6 +5,8 @@
     "macos:pair:dev": "./scripts/macos/pair-dev.sh",
     "windows:dev:daemons": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/windows/dev-daemons.ps1",
     "windows:kill:daemons": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/windows/kill-daemons.ps1",
-    "windows:pair:dev": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/windows/pair-dev.ps1"
+    "windows:package:daemon": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/windows/package-daemon.ps1",
+    "windows:pair:dev": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/windows/pair-dev.ps1",
+    "windows:trust:daemon:dev-cert": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/windows/trust-daemon-dev-certificate.ps1"
   }
 }

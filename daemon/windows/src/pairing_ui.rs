@@ -280,7 +280,10 @@ mod task_dialog {
         TaskDialogIndirect, TASKDIALOGCONFIG, TASKDIALOG_BUTTON, TASKDIALOG_NOTIFICATIONS,
         TDF_ALLOW_DIALOG_CANCELLATION, TDF_SIZE_TO_CONTENT, TDM_CLICK_BUTTON, TDN_CREATED,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, IDCANCEL};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, PostMessageW, SetForegroundWindow, SetWindowPos, ShowWindow,
+        HWND_NOTOPMOST, HWND_TOPMOST, IDCANCEL, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOW,
+    };
 
     const CMD_COPY: usize = 2001;
     const CMD_CLOSE: usize = 2002;
@@ -319,6 +322,7 @@ mod task_dialog {
             cButtons: buttons.len() as u32,
             pButtons: buttons.as_ptr(),
             nDefaultButton: CMD_COPY as i32,
+            pfCallback: Some(dialog_callback),
             ..Default::default()
         };
 
@@ -414,11 +418,36 @@ mod task_dialog {
         _lprefdata: isize,
     ) -> HRESULT {
         if msg == TDN_CREATED {
+            present_dialog(hwnd);
             if let Ok(mut active) = active_select_dialog().lock() {
                 *active = Some(hwnd.0 as isize);
             }
         }
         HRESULT(0)
+    }
+
+    unsafe extern "system" fn dialog_callback(
+        hwnd: HWND,
+        msg: TASKDIALOG_NOTIFICATIONS,
+        _wparam: WPARAM,
+        _lparam: LPARAM,
+        _lprefdata: isize,
+    ) -> HRESULT {
+        if msg == TDN_CREATED {
+            present_dialog(hwnd);
+        }
+        HRESULT(0)
+    }
+
+    fn present_dialog(hwnd: HWND) {
+        unsafe {
+            let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW;
+            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            let _ = BringWindowToTop(hwnd);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
+        }
     }
 
     fn copy_to_clipboard(text: &str) -> Result<()> {
