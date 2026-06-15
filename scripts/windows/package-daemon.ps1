@@ -3,9 +3,9 @@
 param(
   [string]$Version,
   [string]$OutDir,
-  [string]$PackageIdentityName = "Disjukr.WhatsGoingOn",
-  [string]$Publisher = "CN=Whats Going On Dev",
-  [string]$PublisherDisplayName = "disjukr",
+  [string]$PackageIdentityName = "WhatsGoingOn.Daemon",
+  [string]$Publisher = "CN=JongChan Choi",
+  [string]$PublisherDisplayName = "JongChan Choi",
   [string]$CertificatePath,
   [string]$CertificatePassword,
   [switch]$SkipBuild,
@@ -78,28 +78,50 @@ function ConvertTo-XmlEscapedText {
   return [System.Security.SecurityElement]::Escape($Value)
 }
 
-function New-PngIcon {
+function New-PngAssetsFromSvg {
   param(
-    [string]$SourceIcon,
-    [string]$Destination,
-    [int]$Size
+    [string]$SourceSvg,
+    [string]$DestinationDir
   )
 
-  Add-Type -AssemblyName System.Drawing
-  $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($SourceIcon)
-  if (-not $icon) {
-    throw "Could not load icon: $SourceIcon"
+  $deno = Get-Command deno -ErrorAction SilentlyContinue
+  if (-not $deno) {
+    throw "deno is required to render MSIX PNG assets from $SourceSvg"
   }
-  $bitmap = New-Object System.Drawing.Bitmap $Size, $Size
-  $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+
+  $renderer = @'
+import path from "node:path";
+import sharp from "npm:sharp@0.33.5";
+
+const [sourceSvg, destinationDir] = Deno.args;
+const assets = [
+  ["Square44x44Logo.png", 44],
+  ["Square150x150Logo.png", 150],
+  ["StoreLogo.png", 256],
+];
+
+for (const [name, size] of assets) {
+  await sharp(sourceSvg)
+    .resize(size, size, {
+      fit: "contain",
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    })
+    .png()
+    .toFile(path.join(destinationDir, name));
+}
+'@
+
+  $rendererPath = Join-Path ([System.IO.Path]::GetTempPath()) "wgo-render-msix-assets-$PID.ts"
+  Set-Content -LiteralPath $rendererPath -Value $renderer -Encoding UTF8
   try {
-    $graphics.Clear([System.Drawing.Color]::Transparent)
-    $graphics.DrawIcon($icon, (New-Object System.Drawing.Rectangle 0, 0, $Size, $Size))
-    $bitmap.Save($Destination, [System.Drawing.Imaging.ImageFormat]::Png)
+    & $deno.Source run --quiet --no-lock -A $rendererPath $SourceSvg $DestinationDir
+    if ($LASTEXITCODE -ne 0) {
+      throw "Deno SVG renderer failed with exit code $LASTEXITCODE"
+    }
   } finally {
-    $graphics.Dispose()
-    $bitmap.Dispose()
-    $icon.Dispose()
+    if (Test-Path -LiteralPath $rendererPath) {
+      Remove-Item -LiteralPath $rendererPath -Force
+    }
   }
 }
 
@@ -267,13 +289,11 @@ New-Item -ItemType Directory -Force -Path $AssetsDir | Out-Null
 Copy-Item -LiteralPath $SystemExe -Destination (Join-Path $StagingDir "wgo-windows-system.exe")
 Copy-Item -LiteralPath $UserExe -Destination (Join-Path $StagingDir "wgo-windows-user.exe")
 
-$IconPath = Join-Path $RepoRoot "daemon\windows\assets\tray.ico"
-if (-not (Test-Path -LiteralPath $IconPath)) {
-  throw "Missing tray icon: $IconPath"
+$LogoSvgPath = Join-Path $RepoRoot "wgo.svg"
+if (-not (Test-Path -LiteralPath $LogoSvgPath)) {
+  throw "Missing project logo: $LogoSvgPath"
 }
-New-PngIcon -SourceIcon $IconPath -Destination (Join-Path $AssetsDir "Square44x44Logo.png") -Size 44
-New-PngIcon -SourceIcon $IconPath -Destination (Join-Path $AssetsDir "Square150x150Logo.png") -Size 150
-New-PngIcon -SourceIcon $IconPath -Destination (Join-Path $AssetsDir "StoreLogo.png") -Size 50
+New-PngAssetsFromSvg -SourceSvg $LogoSvgPath -DestinationDir $AssetsDir
 
 New-AppxManifest `
   -Path (Join-Path $StagingDir "AppxManifest.xml") `

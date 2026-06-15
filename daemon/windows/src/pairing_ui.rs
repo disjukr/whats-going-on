@@ -21,14 +21,16 @@ pub struct PairingConfirmationModel {
 }
 
 #[derive(Debug, Clone)]
-pub struct MachineInfoWindowModel {
+pub struct DaemonInfoWindowModel {
     pub daemon_url: String,
+    pub daemon_version: String,
 }
 
-pub fn show_machine_info_window(config_path: &Path) -> Result<()> {
+pub fn show_daemon_info_window(config_path: &Path) -> Result<()> {
     let config = load_or_default(config_path)?;
-    show_machine_info(&MachineInfoWindowModel {
+    show_daemon_info(&DaemonInfoWindowModel {
         daemon_url: default_daemon_url(&config),
+        daemon_version: daemon_version(),
     })
 }
 
@@ -40,11 +42,12 @@ pub fn is_pairing_ui_available(config_path: &Path) -> bool {
 }
 
 #[cfg(windows)]
-pub fn show_machine_info_window_owned(config_path: &Path, owner: HWND) -> Result<()> {
+pub fn show_daemon_info_window_owned(config_path: &Path, owner: HWND) -> Result<()> {
     let config = load_or_default(config_path)?;
-    show_machine_info_owned(
-        &MachineInfoWindowModel {
+    show_daemon_info_owned(
+        &DaemonInfoWindowModel {
             daemon_url: default_daemon_url(&config),
+            daemon_version: daemon_version(),
         },
         owner,
     )
@@ -52,7 +55,7 @@ pub fn show_machine_info_window_owned(config_path: &Path, owner: HWND) -> Result
 
 pub fn show_pairing_window(model: &PairingWindowModel) -> Result<()> {
     let message = pairing_dialog_content(&model.pairing_code, model.expires_in_seconds);
-    show_copyable_text_window("Pairing code", &message, &model.pairing_code)
+    show_copyable_text_window("Pairing code", &message, &model.pairing_code, "Copy Code")
 }
 
 #[cfg(windows)]
@@ -78,21 +81,27 @@ pub fn close_active_pairing_confirmation_window() {
     task_dialog::close_active_select_dialog();
 }
 
-pub fn show_machine_info(model: &MachineInfoWindowModel) -> Result<()> {
+pub fn show_daemon_info(model: &DaemonInfoWindowModel) -> Result<()> {
     let message = format!(
-        "Use this URL to add this machine from a client.\n\n{}",
-        model.daemon_url
+        "Daemon URL:\n{}\n\nDaemon version:\n{}",
+        model.daemon_url, model.daemon_version
     );
-    show_copyable_text_window("Machine info", &message, &model.daemon_url)
+    show_copyable_text_window("Daemon info", &message, &model.daemon_url, "Copy URL")
 }
 
 #[cfg(windows)]
-pub fn show_machine_info_owned(model: &MachineInfoWindowModel, owner: HWND) -> Result<()> {
+pub fn show_daemon_info_owned(model: &DaemonInfoWindowModel, owner: HWND) -> Result<()> {
     let message = format!(
-        "Use this URL to add this machine from a client.\n\n{}",
-        model.daemon_url
+        "Daemon URL:\n{}\n\nDaemon version:\n{}",
+        model.daemon_url, model.daemon_version
     );
-    task_dialog::show_owned("Machine info", &message, &model.daemon_url, owner)
+    task_dialog::show_owned(
+        "Daemon info",
+        &message,
+        &model.daemon_url,
+        "Copy URL",
+        owner,
+    )
 }
 
 pub fn show_error_window(message: &str) -> Result<()> {
@@ -117,6 +126,10 @@ fn default_daemon_url(config: &SystemConfig) -> String {
         return format!("https://{domain}:{port}");
     }
     format!("https://localhost:{port}")
+}
+
+fn daemon_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 fn has_usable_daemon_endpoint(config_path: &Path, config: &SystemConfig) -> bool {
@@ -230,12 +243,22 @@ fn lcg_next(seed: u64) -> u64 {
 }
 
 #[cfg(windows)]
-fn show_copyable_text_window(title: &str, text: &str, copy_text: &str) -> Result<()> {
-    task_dialog::show(title, text, copy_text)
+fn show_copyable_text_window(
+    title: &str,
+    text: &str,
+    copy_text: &str,
+    copy_button_label: &str,
+) -> Result<()> {
+    task_dialog::show(title, text, copy_text, copy_button_label)
 }
 
 #[cfg(not(windows))]
-fn show_copyable_text_window(title: &str, text: &str, _copy_text: &str) -> Result<()> {
+fn show_copyable_text_window(
+    title: &str,
+    text: &str,
+    _copy_text: &str,
+    _copy_button_label: &str,
+) -> Result<()> {
     println!("{title}\n{text}");
     Ok(())
 }
@@ -291,15 +314,21 @@ mod task_dialog {
     const CF_UNICODETEXT_FORMAT: u32 = 13;
     static ACTIVE_SELECT_DIALOG: OnceLock<Mutex<Option<isize>>> = OnceLock::new();
 
-    pub fn show(title: &str, text: &str, copy_text: &str) -> Result<()> {
-        show_owned(title, text, copy_text, HWND::default())
+    pub fn show(title: &str, text: &str, copy_text: &str, copy_button_label: &str) -> Result<()> {
+        show_owned(title, text, copy_text, copy_button_label, HWND::default())
     }
 
-    pub fn show_owned(title: &str, text: &str, copy_text: &str, owner: HWND) -> Result<()> {
+    pub fn show_owned(
+        title: &str,
+        text: &str,
+        copy_text: &str,
+        copy_button_label: &str,
+        owner: HWND,
+    ) -> Result<()> {
         let window_title = wide_null("Whats Going On");
         let main_instruction = wide_null(title);
         let content = wide_null(text);
-        let copy_button_text = wide_null("Copy");
+        let copy_button_text = wide_null(copy_button_label);
         let close_button_text = wide_null("Close");
         let buttons = [
             TASKDIALOG_BUTTON {

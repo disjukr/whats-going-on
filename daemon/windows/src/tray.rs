@@ -49,7 +49,7 @@ mod windows_tray {
     };
     use crate::pairing_ui::{
         close_active_pairing_confirmation_window, confirm_pairing_request_owned,
-        is_pairing_ui_available, show_error_window, show_machine_info_window_owned,
+        is_pairing_ui_available, show_daemon_info_window_owned, show_error_window,
         show_pairing_window, PairingConfirmationModel, PairingWindowModel,
     };
 
@@ -60,7 +60,7 @@ mod windows_tray {
     const PAIRING_NOTIFICATION_MESSAGE: u32 = WM_APP + 2;
     const PAIRING_CONFIRMATION_MESSAGE: u32 = WM_APP + 3;
     const TRAY_ICON_ID: u32 = 1;
-    const CMD_SHOW_MACHINE_INFO: usize = 1001;
+    const CMD_SHOW_DAEMON_INFO: usize = 1001;
     const CMD_OPEN_SETTINGS: usize = 1002;
     const CMD_QUIT: usize = 1003;
     const NIN_KEYSELECT: u32 = 1025;
@@ -68,7 +68,7 @@ mod windows_tray {
     const TRAY_ICON_SIZE: i32 = 32;
     const ICON_RESOURCE_VERSION: u32 = 0x0003_0000;
     const CONFIG_NOT_READY_MESSAGE: &str =
-        "Machine config is not ready. Set a .ts.net domain or TLS certificate files first.";
+        "Daemon config is not ready. Set a .ts.net domain or TLS certificate files first.";
 
     struct TrayRuntime {
         config_path: PathBuf,
@@ -329,7 +329,7 @@ mod windows_tray {
                         if has_pending_pairing_confirmation() {
                             show_pending_pairing_confirmation(hwnd);
                         } else {
-                            show_machine_info(hwnd);
+                            show_daemon_info(hwnd);
                         }
                     }
                     WM_CONTEXTMENU => show_context_menu(hwnd),
@@ -367,7 +367,7 @@ mod windows_tray {
             }
             WM_COMMAND => {
                 match low_word(wparam.0) as usize {
-                    CMD_SHOW_MACHINE_INFO => show_machine_info(hwnd),
+                    CMD_SHOW_DAEMON_INFO => show_daemon_info(hwnd),
                     CMD_OPEN_SETTINGS => open_settings(hwnd),
                     CMD_QUIT => {
                         let _ = unsafe { DestroyWindow(hwnd) };
@@ -571,8 +571,8 @@ mod windows_tray {
             AppendMenuW(
                 menu,
                 guarded_item_flags,
-                CMD_SHOW_MACHINE_INFO,
-                w!("Machine info"),
+                CMD_SHOW_DAEMON_INFO,
+                w!("Daemon info"),
             )?;
             AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())?;
             AppendMenuW(menu, MF_STRING, CMD_OPEN_SETTINGS, w!("Settings"))?;
@@ -610,7 +610,7 @@ mod windows_tray {
         Ok(())
     }
 
-    fn show_machine_info(hwnd: HWND) {
+    fn show_daemon_info(hwnd: HWND) {
         let Some(runtime) = TRAY_RUNTIME.get() else {
             let _ = show_error_window("Tray runtime is not initialized.");
             return;
@@ -619,8 +619,8 @@ mod windows_tray {
             let _ = show_error_window(CONFIG_NOT_READY_MESSAGE);
             return;
         }
-        if let Err(err) = show_machine_info_window_owned(&runtime.config_path, hwnd) {
-            let _ = show_error_window(&format!("Failed to show machine info:\n\n{err}"));
+        if let Err(err) = show_daemon_info_window_owned(&runtime.config_path, hwnd) {
+            let _ = show_error_window(&format!("Failed to show daemon info:\n\n{err}"));
         }
     }
 
