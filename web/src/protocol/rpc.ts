@@ -18,16 +18,17 @@ import { Machine, normalizeMachineUrl } from "../state/machines.ts";
 const PROC_GET_DAEMON_INFO = 1;
 const PROC_START_PAIRING = 2;
 const PROC_COMPLETE_PAIRING = 3;
-const PROC_SUBSCRIBE_ROOTS = 4;
-const PROC_SUBSCRIBE_DIRECTORY = 5;
-const PROC_READ_FILE = 6;
-const PROC_WRITE_FILE = 7;
-const PROC_CREATE_NODES = 8;
-const PROC_RENAME_PATHS = 9;
-const PROC_DELETE_PATHS = 10;
-const PROC_RENEW_CLIENT_CREDENTIAL = 11;
+const PROC_RENEW_CLIENT_CREDENTIAL = 4;
+const PROC_SUBSCRIBE_ROOTS = 5;
+const PROC_SUBSCRIBE_DIRECTORY = 6;
+const PROC_READ_FILE = 7;
+const PROC_WRITE_FILE = 8;
+const PROC_CREATE_NODES = 9;
+const PROC_RENAME_PATHS = 10;
+const PROC_DELETE_PATHS = 11;
 const CONNECT_TIMEOUT_MS = 10_000;
 const DATAGRAM_PING_TIMEOUT_MS = 5_000;
+const CLIENT_CREDENTIAL_RENEWAL_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export interface RpcSession {
   transport: WebTransport;
@@ -46,6 +47,17 @@ interface PendingDatagramPing {
   timeout: ReturnType<typeof setTimeout>;
   resolve: (latencyMs: number) => void;
   reject: (err: Error) => void;
+}
+
+export interface ClientCredentialRenewal {
+  machineId: string;
+  clientId: string;
+  clientSecret: string;
+  clientCredentialExpiresAtUnix: number;
+}
+
+export interface RpcCallOptions {
+  onClientCredentialRenewal?: (renewal: ClientCredentialRenewal) => void;
 }
 
 const rpcSessions = new Map<string, Promise<RpcSession>>();
@@ -204,19 +216,6 @@ export async function completePairing(
   };
 }
 
-export async function renewClientCredential(
-  machine: Machine,
-): Promise<RenewClientCredentialResponse> {
-  const response = await callUnaryPayload(
-    machine,
-    PROC_RENEW_CLIENT_CREDENTIAL,
-  );
-  const map = decodeMap(response);
-  return {
-    clientCredentialExpiresAtUnix: integer(map.get(1)),
-  };
-}
-
 export async function startPairing(
   session: RpcSession,
   machine: Machine,
@@ -265,18 +264,21 @@ export async function getDaemonInfo(
 
 export async function* subscribeRoots(
   machine: Machine,
+  options: RpcCallOptions = {},
 ): AsyncGenerator<RootsTableEvent> {
   yield* callServerStreamEvents(
     machine,
     PROC_SUBSCRIBE_ROOTS,
     undefined,
     decodeRootsTableEvent,
+    options,
   );
 }
 
 export async function* subscribeDirectory(
   machine: Machine,
   path: string,
+  options: RpcCallOptions = {},
 ): AsyncGenerator<DirectoryTableEvent> {
   const payload = encodeCbor(new Map<number, CborValue>([[1, path]]));
   yield* callServerStreamEvents(
@@ -284,6 +286,7 @@ export async function* subscribeDirectory(
     PROC_SUBSCRIBE_DIRECTORY,
     payload,
     decodeDirectoryTableEvent,
+    options,
   );
 }
 
@@ -291,6 +294,7 @@ export async function readFile(
   machine: Machine,
   path: string,
   options: ReadFileOptions = {},
+  rpcOptions: RpcCallOptions = {},
 ): Promise<Uint8Array> {
   const request = new Map<number, CborValue>([[1, path]]);
   if (options.offset !== undefined) request.set(2, options.offset);
@@ -303,6 +307,7 @@ export async function readFile(
       PROC_READ_FILE,
       encodeCbor(request),
       decodeReadFileChunk,
+      rpcOptions,
     )
   ) {
     chunks.push(chunk);
@@ -316,6 +321,7 @@ export async function writeFile(
   mode: WriteFileMode,
   fileBytes: Uint8Array,
   options: Omit<WriteFileStart, "path" | "mode"> & { offset?: number } = {},
+  rpcOptions: RpcCallOptions = {},
 ): Promise<WriteFileResult> {
   return await writeFileChunks(
     machine,
@@ -326,6 +332,7 @@ export async function writeFile(
       modifiedAtMs: options.modifiedAtMs,
     },
     [{ offset: options.offset, bytes: fileBytes }],
+    rpcOptions,
   );
 }
 
@@ -333,12 +340,14 @@ export async function writeFileChunks(
   machine: Machine,
   start: WriteFileStart,
   chunks: WriteFileChunk[],
+  options: RpcCallOptions = {},
 ): Promise<WriteFileResult> {
   const response = await callClientStreamPayload(
     machine,
     PROC_WRITE_FILE,
     encodeWriteFileStart(start),
     chunks.map(encodeWriteFileChunk),
+    options,
   );
   return decodeWriteFileResult(response);
 }
@@ -346,19 +355,26 @@ export async function writeFileChunks(
 export async function createNodes(
   machine: Machine,
   nodes: CreateNodeOp[],
+  options: RpcCallOptions = {},
 ): Promise<BulkMutationResponse> {
   const payload = encodeCbor(
     new Map<number, CborValue>([
       [1, nodes.map(encodeCreateNodeOp)],
     ]),
   );
-  const response = await callUnaryPayload(machine, PROC_CREATE_NODES, payload);
+  const response = await callUnaryPayload(
+    machine,
+    PROC_CREATE_NODES,
+    payload,
+    options,
+  );
   return decodeBulkMutationResponse(response);
 }
 
 export async function renamePaths(
   machine: Machine,
   ops: RenamePathOp[],
+  options: RpcCallOptions = {},
 ): Promise<BulkMutationResponse> {
   const payload = encodeCbor(
     new Map<number, CborValue>([
@@ -373,7 +389,12 @@ export async function renamePaths(
       ],
     ]),
   );
-  const response = await callUnaryPayload(machine, PROC_RENAME_PATHS, payload);
+  const response = await callUnaryPayload(
+    machine,
+    PROC_RENAME_PATHS,
+    payload,
+    options,
+  );
   return decodeBulkMutationResponse(response);
 }
 
@@ -381,6 +402,7 @@ export async function deletePaths(
   machine: Machine,
   paths: string[],
   mode: DeleteMode,
+  options: RpcCallOptions = {},
 ): Promise<BulkMutationResponse> {
   const payload = encodeCbor(
     new Map<number, CborValue>([
@@ -388,7 +410,12 @@ export async function deletePaths(
       [2, mode],
     ]),
   );
-  const response = await callUnaryPayload(machine, PROC_DELETE_PATHS, payload);
+  const response = await callUnaryPayload(
+    machine,
+    PROC_DELETE_PATHS,
+    payload,
+    options,
+  );
   return decodeBulkMutationResponse(response);
 }
 
@@ -410,7 +437,7 @@ async function callUnaryPayload(
   machine: Machine,
   procId: number,
   payload?: Uint8Array,
-  options: { includeAuth?: boolean } = {},
+  options: RpcCallOptions & { includeAuth?: boolean } = {},
 ): Promise<Uint8Array> {
   const response = await callUnary(machine, procId, payload, options);
   if (!response) throw new Error("missing response payload");
@@ -431,12 +458,12 @@ async function callUnary(
   machine: Machine,
   procId: number,
   payload?: Uint8Array,
-  options: { includeAuth?: boolean } = {},
+  options: RpcCallOptions & { includeAuth?: boolean } = {},
 ): Promise<Uint8Array | undefined> {
   if (
     options.includeAuth !== false && machine.clientId && machine.clientSecret
   ) {
-    const session = await authenticatedSession(machine);
+    const session = await authenticatedSession(machine, options);
     try {
       return await sendUnary(session.transport, procId, payload);
     } catch (err) {
@@ -458,12 +485,14 @@ async function callClientStreamPayload(
   procId: number,
   startPayload: Uint8Array,
   chunkPayloads: Uint8Array[],
+  options: RpcCallOptions = {},
 ): Promise<Uint8Array> {
   const response = await callClientStream(
     machine,
     procId,
     startPayload,
     chunkPayloads,
+    options,
   );
   if (!response) throw new Error("missing response payload");
   return response;
@@ -474,9 +503,10 @@ async function callClientStream(
   procId: number,
   startPayload: Uint8Array,
   chunkPayloads: Uint8Array[],
+  options: RpcCallOptions = {},
 ): Promise<Uint8Array | undefined> {
   if (machine.clientId && machine.clientSecret) {
-    const session = await authenticatedSession(machine);
+    const session = await authenticatedSession(machine, options);
     try {
       return await sendClientStream(
         session.transport,
@@ -508,9 +538,10 @@ async function* callServerStreamEvents<T>(
   procId: number,
   payload: Uint8Array | undefined,
   decodePayload: (bytes: Uint8Array) => T,
+  options: RpcCallOptions = {},
 ): AsyncGenerator<T> {
   if (machine.clientId && machine.clientSecret) {
-    const session = await authenticatedSession(machine);
+    const session = await authenticatedSession(machine, options);
     try {
       yield* streamServerEvents(
         session.transport,
@@ -578,7 +609,14 @@ function withTimeout<T>(
   });
 }
 
-function authenticatedSession(machine: Machine): Promise<RpcSession> {
+interface AuthenticatedSessionOptions extends RpcCallOptions {
+  renewOnConnect?: boolean;
+}
+
+function authenticatedSession(
+  machine: Machine,
+  options: AuthenticatedSessionOptions = {},
+): Promise<RpcSession> {
   const key = sessionKey(machine);
   const current = rpcSessions.get(key);
   if (current) return current;
@@ -598,6 +636,10 @@ function authenticatedSession(machine: Machine): Promise<RpcSession> {
       closeRpcSession(session);
       throw err;
     }
+    if (options.renewOnConnect !== false) {
+      await renewSessionCredential(machine, session.transport, options);
+      startClientCredentialRenewalLoop(machine, session, options);
+    }
     session.transport.closed.finally(() => {
       if (rpcSessions.get(key) === sessionPromise) rpcSessions.delete(key);
     });
@@ -609,6 +651,50 @@ function authenticatedSession(machine: Machine): Promise<RpcSession> {
     if (rpcSessions.get(key) === sessionPromise) rpcSessions.delete(key);
   });
   return sessionPromise;
+}
+
+async function renewSessionCredential(
+  machine: Machine,
+  transport: WebTransport,
+  options: RpcCallOptions,
+): Promise<void> {
+  if (!machine.clientId || !machine.clientSecret) return;
+  try {
+    const renewal = await renewAuthenticatedSessionCredential(transport);
+    emitClientCredentialRenewal(machine, options, renewal);
+  } catch {
+    // A valid session can still be useful even if persisting a refreshed
+    // credential expiry fails. The next renewal tick or authenticated session
+    // will retry.
+  }
+}
+
+function startClientCredentialRenewalLoop(
+  machine: Machine,
+  session: RpcSession,
+  options: RpcCallOptions,
+): void {
+  const timer = setInterval(
+    () => void renewSessionCredential(machine, session.transport, options),
+    CLIENT_CREDENTIAL_RENEWAL_INTERVAL_MS,
+  );
+  session.transport.closed
+    .catch(() => {})
+    .finally(() => clearInterval(timer));
+}
+
+function emitClientCredentialRenewal(
+  machine: Machine,
+  options: RpcCallOptions,
+  renewal: RenewClientCredentialResponse,
+): void {
+  if (!machine.clientId || !machine.clientSecret) return;
+  options.onClientCredentialRenewal?.({
+    machineId: machine.id,
+    clientId: machine.clientId,
+    clientSecret: machine.clientSecret,
+    clientCredentialExpiresAtUnix: renewal.clientCredentialExpiresAtUnix,
+  });
 }
 
 function closeSession(machine: Machine): void {
@@ -660,6 +746,19 @@ async function authenticateSession(
   if (response.kind !== ReqResMessageKind.SessionAuthenticated) {
     throw new Error("expected session authentication response");
   }
+}
+
+async function renewAuthenticatedSessionCredential(
+  transport: WebTransport,
+): Promise<RenewClientCredentialResponse> {
+  const response = await sendUnaryPayload(
+    transport,
+    PROC_RENEW_CLIENT_CREDENTIAL,
+  );
+  const map = decodeMap(response);
+  return {
+    clientCredentialExpiresAtUnix: integer(map.get(1)),
+  };
 }
 
 function startDatagramRuntime(transport: WebTransport): DatagramRuntime {
@@ -1293,8 +1392,12 @@ function decodeErrorPayload(
 }
 
 function methodErrorCode(procId: number, variantId: number): string {
-  const key = `${procId}:${variantId}`;
+  const key = methodErrorKey(procId, variantId);
   return METHOD_ERROR_CODES[key] ?? `method_error_${variantId}`;
+}
+
+function methodErrorKey(procId: number, variantId: number): string {
+  return `${procId}:${variantId}`;
 }
 
 function rpcErrorCode(value: unknown): string {
@@ -1320,32 +1423,32 @@ const RPC_ERROR_CODES: Record<string, string> = {
 };
 
 const METHOD_ERROR_CODES: Record<string, string> = {
-  "1:0": "Failed",
-  "2:0": "Failed",
-  "3:1": "PairingNotStarted",
-  "3:2": "PairingExpired",
-  "3:3": "InvalidPairingCode",
-  "4:0": "Failed",
-  "5:0": "Failed",
-  "5:1": "PermissionDenied",
-  "5:2": "NotFound",
-  "5:3": "NotDirectory",
-  "6:0": "Failed",
-  "6:1": "PermissionDenied",
-  "6:2": "NotFound",
-  "6:3": "NotFile",
-  "6:4": "InvalidPath",
-  "7:0": "Failed",
-  "7:1": "PermissionDenied",
-  "7:2": "NotFound",
-  "7:3": "AlreadyExists",
-  "7:4": "NotDirectory",
-  "7:5": "NotFile",
-  "7:6": "InvalidPath",
-  "8:0": "Failed",
-  "9:0": "Failed",
-  "10:0": "Failed",
-  "11:0": "Failed",
+  [methodErrorKey(PROC_GET_DAEMON_INFO, 0)]: "Failed",
+  [methodErrorKey(PROC_START_PAIRING, 0)]: "Failed",
+  [methodErrorKey(PROC_COMPLETE_PAIRING, 1)]: "PairingNotStarted",
+  [methodErrorKey(PROC_COMPLETE_PAIRING, 2)]: "PairingExpired",
+  [methodErrorKey(PROC_COMPLETE_PAIRING, 3)]: "InvalidPairingCode",
+  [methodErrorKey(PROC_RENEW_CLIENT_CREDENTIAL, 0)]: "Failed",
+  [methodErrorKey(PROC_SUBSCRIBE_ROOTS, 0)]: "Failed",
+  [methodErrorKey(PROC_SUBSCRIBE_DIRECTORY, 0)]: "Failed",
+  [methodErrorKey(PROC_SUBSCRIBE_DIRECTORY, 1)]: "PermissionDenied",
+  [methodErrorKey(PROC_SUBSCRIBE_DIRECTORY, 2)]: "NotFound",
+  [methodErrorKey(PROC_SUBSCRIBE_DIRECTORY, 3)]: "NotDirectory",
+  [methodErrorKey(PROC_READ_FILE, 0)]: "Failed",
+  [methodErrorKey(PROC_READ_FILE, 1)]: "PermissionDenied",
+  [methodErrorKey(PROC_READ_FILE, 2)]: "NotFound",
+  [methodErrorKey(PROC_READ_FILE, 3)]: "NotFile",
+  [methodErrorKey(PROC_READ_FILE, 4)]: "InvalidPath",
+  [methodErrorKey(PROC_WRITE_FILE, 0)]: "Failed",
+  [methodErrorKey(PROC_WRITE_FILE, 1)]: "PermissionDenied",
+  [methodErrorKey(PROC_WRITE_FILE, 2)]: "NotFound",
+  [methodErrorKey(PROC_WRITE_FILE, 3)]: "AlreadyExists",
+  [methodErrorKey(PROC_WRITE_FILE, 4)]: "NotDirectory",
+  [methodErrorKey(PROC_WRITE_FILE, 5)]: "NotFile",
+  [methodErrorKey(PROC_WRITE_FILE, 6)]: "InvalidPath",
+  [methodErrorKey(PROC_CREATE_NODES, 0)]: "Failed",
+  [methodErrorKey(PROC_RENAME_PATHS, 0)]: "Failed",
+  [methodErrorKey(PROC_DELETE_PATHS, 0)]: "Failed",
 };
 
 const SESSION_AUTH_ERROR_CODES: Record<string, string> = {

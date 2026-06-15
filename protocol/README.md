@@ -63,6 +63,22 @@ RPC payload bytes are selected by proc id and by response variant. Method-level
 errors use the proc's declared `throws` union. Failures outside a method
 contract use the generic wire/envelope error payload.
 
+Current proc id registry:
+
+| id | proc                    |
+| -: | ----------------------- |
+|  1 | `GetDaemonInfo`         |
+|  2 | `StartPairing`          |
+|  3 | `CompletePairing`       |
+|  4 | `RenewClientCredential` |
+|  5 | `SubscribeRoots`        |
+|  6 | `SubscribeDirectory`    |
+|  7 | `ReadFile`              |
+|  8 | `WriteFile`             |
+|  9 | `CreateNodes`           |
+| 10 | `RenamePaths`           |
+| 11 | `DeletePaths`           |
+
 `GetDaemonInfo` returns process-level daemon metadata: supported proc ids,
 daemon version, and a human-readable OS name for the daemon host. The OS string
 should include useful platform-specific details when available, such as Windows

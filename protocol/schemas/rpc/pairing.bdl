@@ -27,7 +27,7 @@ proc CompletePairing = CompletePairingReq -> CompletePairingRes throws CompleteP
 | Extends the expiry of the authenticated paired client credential without
 | rotating the client secret. Clients should use CompletePairing with a local
 | pairing code when they need to rotate the secret or recover after expiry.
-@ id - 11
+@ id - 4
 @ stream - unary
 proc RenewClientCredential = void -> RenewClientCredentialRes throws RenewClientCredentialError
 

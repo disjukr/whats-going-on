@@ -222,7 +222,7 @@ export const explorerRootsBunja = bunja(() => {
       }
 
       let cancelled = false;
-      const iterator = subscribeRoots(machine);
+      const iterator = subscribeRoots(machine, machines.rpcCallOptions());
       stopCurrent = () => {
         cancelled = true;
         void iterator.return(undefined);
@@ -318,7 +318,11 @@ export const explorerDirectoryBunja = bunja(() => {
       }
 
       let cancelled = false;
-      const iterator = subscribeDirectory(machine, currentPath);
+      const iterator = subscribeDirectory(
+        machine,
+        currentPath,
+        machines.rpcCallOptions(),
+      );
       stopCurrent = () => {
         cancelled = true;
         void iterator.return(undefined);

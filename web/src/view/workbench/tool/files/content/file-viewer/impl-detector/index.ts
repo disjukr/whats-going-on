@@ -1,5 +1,9 @@
 import type { FileViewerImplId } from "../impl/index.ts";
-import { type FsEntry, readFile } from "../../../../../../../protocol/rpc.ts";
+import {
+  type FsEntry,
+  readFile,
+  type RpcCallOptions,
+} from "../../../../../../../protocol/rpc.ts";
 import type { Machine } from "../../../../../../../state/machines.ts";
 
 const sampleByteCount = 4096;
@@ -104,6 +108,7 @@ const textFilenames = new Set([
 export async function detectFileViewerImpl(
   machine: Machine | undefined,
   fsEntry: FsEntry,
+  rpcOptions: RpcCallOptions,
 ): Promise<DetectFileViewerImplResult> {
   const nameHint = detectFileViewerImplFromName(fsEntry);
   if (!machine) {
@@ -117,7 +122,7 @@ export async function detectFileViewerImpl(
     const initialBytes = await readFile(machine, fsEntry.path, {
       offset: 0,
       length: sampleByteCount,
-    });
+    }, rpcOptions);
     return {
       initialBytes,
       impl: detectFileViewerImplFromBytes(initialBytes, nameHint),

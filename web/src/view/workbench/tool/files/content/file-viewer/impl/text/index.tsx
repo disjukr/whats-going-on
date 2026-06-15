@@ -36,6 +36,7 @@ export default function TextFileViewer() {
   const fsEntry = viewer.fsEntry;
   const viewerState = useAtomValue(viewer.stateAtom);
   const machine = useAtomValue(viewer.machineAtom);
+  const rpcCallOptions = viewer.rpcCallOptions;
   const requiresConfirmation = fsEntry.size === undefined ||
     fsEntry.size > inlineOpenLimitBytes;
   const [confirmedFsEntryPath, setConfirmedFsEntryPath] = useState<
@@ -54,7 +55,7 @@ export default function TextFileViewer() {
       try {
         const bytes = hasCompleteInitialBytes(fsEntry, viewerState.initialBytes)
           ? viewerState.initialBytes
-          : await readFile(machine, fsEntry.path);
+          : await readFile(machine, fsEntry.path, {}, rpcCallOptions());
         if (cancelled) return;
         setState({
           phase: "ready",
@@ -72,7 +73,7 @@ export default function TextFileViewer() {
     return () => {
       cancelled = true;
     };
-  }, [confirmed, fsEntry, fsEntry.path, machine, viewerState]);
+  }, [confirmed, fsEntry, fsEntry.path, machine, rpcCallOptions, viewerState]);
 
   if (!machine) {
     return (

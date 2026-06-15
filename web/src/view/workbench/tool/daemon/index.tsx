@@ -16,14 +16,14 @@ const procNames = new Map<number, string>([
   [1, "GetDaemonInfo"],
   [2, "StartPairing"],
   [3, "CompletePairing"],
-  [4, "SubscribeRoots"],
-  [5, "SubscribeDirectory"],
-  [6, "ReadFile"],
-  [7, "WriteFile"],
-  [8, "CreateNodes"],
-  [9, "RenamePaths"],
-  [10, "DeletePaths"],
-  [11, "RenewClientCredential"],
+  [4, "RenewClientCredential"],
+  [5, "SubscribeRoots"],
+  [6, "SubscribeDirectory"],
+  [7, "ReadFile"],
+  [8, "WriteFile"],
+  [9, "CreateNodes"],
+  [10, "RenamePaths"],
+  [11, "DeletePaths"],
 ]);
 
 const daemonToolClassName = [

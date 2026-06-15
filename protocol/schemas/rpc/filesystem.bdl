@@ -15,7 +15,7 @@
 | first response event is RootsTableEvent.Snapshot. Later Snapshot events
 | replace the whole roots table view; Patch events apply incremental root
 | membership updates.
-@ id - 4
+@ id - 5
 @ stream - server
 proc SubscribeRoots = void -> RootsTableEvent throws SubscribeRootsError
 
@@ -24,7 +24,7 @@ proc SubscribeRoots = void -> RootsTableEvent throws SubscribeRootsError
 | response event is DirectoryTableEvent.Snapshot. Later Snapshot events replace
 | the whole subscribed view; Patch events apply incremental view membership
 | updates.
-@ id - 5
+@ id - 6
 @ stream - server
 proc SubscribeDirectory = SubscribeDirectoryReq -> DirectoryTableEvent throws SubscribeDirectoryError
 
@@ -33,7 +33,7 @@ proc SubscribeDirectory = SubscribeDirectoryReq -> DirectoryTableEvent throws Su
 | ReadFileChunk messages and then closes normally at EOF or after the requested
 | length has been sent. Chunk size is chosen by the server. Each chunk carries
 | the absolute file offset of its bytes.
-@ id - 6
+@ id - 7
 @ stream - server
 proc ReadFile = ReadFileReq -> ReadFileChunk throws ReadFileError
 
@@ -45,7 +45,7 @@ proc ReadFile = ReadFileReq -> ReadFileChunk throws ReadFileError
 | is invalid. Normal request completion is represented by transport half-close.
 | The resulting filesystem state is observed through active table
 | subscriptions.
-@ id - 7
+@ id - 8
 @ stream - client
 proc WriteFile = WriteFileReq -> WriteFileResult throws WriteFileError
 
@@ -55,7 +55,7 @@ proc WriteFile = WriteFileReq -> WriteFileResult throws WriteFileError
 | Directory creation behaves like mkdir -p. File, symlink, and hardlink creation
 | create missing parent directories but fail if the target path already exists.
 | The resulting filesystem state is observed through active table subscriptions.
-@ id - 8
+@ id - 9
 @ stream - unary
 proc CreateNodes = CreateNodesReq -> BulkMutationRes throws FsMutationError
 
@@ -64,7 +64,7 @@ proc CreateNodes = CreateNodesReq -> BulkMutationRes throws FsMutationError
 | best-effort bulk command: each result item references the zero-based request
 | item index. Destination parent directories must already exist. The resulting
 | filesystem state is observed through active table subscriptions.
-@ id - 9
+@ id - 10
 @ stream - unary
 proc RenamePaths = RenamePathsReq -> BulkMutationRes throws FsMutationError
 
@@ -73,7 +73,7 @@ proc RenamePaths = RenamePathsReq -> BulkMutationRes throws FsMutationError
 | bulk command: each result item references the zero-based request item index.
 | The resulting filesystem state is observed through active table
 | subscriptions.
-@ id - 10
+@ id - 11
 @ stream - unary
 proc DeletePaths = DeletePathsReq -> BulkMutationRes throws FsMutationError
 

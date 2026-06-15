@@ -1,17 +1,11 @@
 import { bunja } from "bunja";
 import { atom } from "jotai";
-import {
-  isInvalidCredentialsError,
-  renewClientCredential,
-} from "../protocol/rpc.ts";
+import type { RpcCallOptions } from "../protocol/rpc.ts";
 import { loadMachines, Machine, saveMachines } from "./machines.ts";
 import { JotaiStoreScope } from "./jotai-store.ts";
 import { MachineIdScope } from "./machine-id.tsx";
 
 const initialMachines = loadMachines();
-const CREDENTIAL_RENEWAL_LEAD_MS = 7 * 24 * 60 * 60 * 1000;
-const CREDENTIAL_RENEWAL_RETRY_MS = 60 * 1000;
-const MAX_RENEWAL_TIMER_MS = 24 * 60 * 60 * 1000;
 
 export const machineStoreBunja = bunja(() => {
   const store = bunja.use(JotaiStoreScope);
@@ -97,83 +91,23 @@ export const machineStoreBunja = bunja(() => {
     })
   );
 
-  bunja.effect(() => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let stopped = false;
-    let renewingKey = "";
-
-    function clearTimer() {
-      if (timer !== undefined) {
-        clearTimeout(timer);
-        timer = undefined;
-      }
-    }
-
-    function schedule() {
-      clearTimer();
-      if (stopped) return;
-      const selected = store.get(selectedAtom);
-      if (
-        !selected?.clientId || !selected.clientSecret ||
-        !selected.clientCredentialExpiresAtUnix
-      ) {
-        return;
-      }
-      const renewAtMs = selected.clientCredentialExpiresAtUnix * 1000 -
-        CREDENTIAL_RENEWAL_LEAD_MS;
-      const delayMs = Math.min(
-        Math.max(0, renewAtMs - Date.now()),
-        MAX_RENEWAL_TIMER_MS,
-      );
-      timer = setTimeout(() => void renewSelected(), delayMs);
-    }
-
-    async function renewSelected() {
-      const selected = store.get(selectedAtom);
-      if (!selected?.clientId || !selected.clientSecret) return;
-      const key = machineCredentialKey(selected);
-      if (renewingKey === key) return;
-      renewingKey = key;
-      let retryScheduled = false;
-      try {
-        const { clientCredentialExpiresAtUnix } = await renewClientCredential(
-          selected,
+  function rpcCallOptions(): RpcCallOptions {
+    return {
+      onClientCredentialRenewal: (renewal) => {
+        const machine = getMachine(store.get(machinesAtom), renewal.machineId);
+        if (
+          machine?.clientId !== renewal.clientId ||
+          machine.clientSecret !== renewal.clientSecret
+        ) {
+          return;
+        }
+        setMachineCredentialExpiry(
+          renewal.machineId,
+          renewal.clientCredentialExpiresAtUnix,
         );
-        if (!stopped && machineCredentialKey(store.get(selectedAtom)) === key) {
-          setMachineCredentialExpiry(
-            selected.id,
-            clientCredentialExpiresAtUnix,
-          );
-        }
-      } catch (err) {
-        if (!stopped && machineCredentialKey(store.get(selectedAtom)) === key) {
-          if (isInvalidCredentialsError(err)) {
-            clearMachineCredentials(selected.id);
-          } else {
-            clearTimer();
-            timer = setTimeout(
-              () => void renewSelected(),
-              CREDENTIAL_RENEWAL_RETRY_MS,
-            );
-            retryScheduled = true;
-          }
-        }
-      } finally {
-        if (renewingKey === key) renewingKey = "";
-        if (!stopped && !retryScheduled) schedule();
-      }
-    }
-
-    const unsubscribeMachines = store.sub(machinesAtom, schedule);
-    const unsubscribeSelected = store.sub(selectedIdAtom, schedule);
-    schedule();
-    return () => {
-      stopped = true;
-      clearTimer();
-      unsubscribeMachines();
-      unsubscribeSelected();
+      },
     };
-  });
+  }
 
   return {
     machinesAtom,
@@ -187,6 +121,7 @@ export const machineStoreBunja = bunja(() => {
     setMachineCredentials,
     clearMachineCredentials,
     setMachineCredentialExpiry,
+    rpcCallOptions,
     deleteSelectedMachine,
   };
 });
@@ -216,14 +151,4 @@ function getMachine(
 
 export function isPaired(machine?: Machine): boolean {
   return Boolean(machine?.clientId && machine?.clientSecret);
-}
-
-function machineCredentialKey(machine?: Machine): string {
-  if (!machine) return "";
-  return [
-    machine.id,
-    machine.baseUrl,
-    machine.clientId ?? "",
-    machine.clientSecret ?? "",
-  ].join("\n");
 }

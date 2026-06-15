@@ -30,14 +30,14 @@ pub enum ProcId {
     GetDaemonInfo = 1,
     StartPairing = 2,
     CompletePairing = 3,
-    SubscribeRoots = 4,
-    SubscribeDirectory = 5,
-    ReadFile = 6,
-    WriteFile = 7,
-    CreateNodes = 8,
-    RenamePaths = 9,
-    DeletePaths = 10,
-    RenewClientCredential = 11,
+    RenewClientCredential = 4,
+    SubscribeRoots = 5,
+    SubscribeDirectory = 6,
+    ReadFile = 7,
+    WriteFile = 8,
+    CreateNodes = 9,
+    RenamePaths = 10,
+    DeletePaths = 11,
 }
 
 impl ProcId {
@@ -45,6 +45,7 @@ impl ProcId {
         Self::GetDaemonInfo,
         Self::StartPairing,
         Self::CompletePairing,
+        Self::RenewClientCredential,
         Self::SubscribeRoots,
         Self::SubscribeDirectory,
         Self::ReadFile,
@@ -52,7 +53,6 @@ impl ProcId {
         Self::CreateNodes,
         Self::RenamePaths,
         Self::DeletePaths,
-        Self::RenewClientCredential,
     ];
 
     pub fn as_u64(self) -> u64 {

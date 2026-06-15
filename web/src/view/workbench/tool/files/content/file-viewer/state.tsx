@@ -6,7 +6,10 @@ import { atomWithStorage } from "jotai/utils";
 import { FsEntry } from "../../../../../../protocol/rpc.ts";
 import { fileViewerSelectedImplStorageKey } from "../../../../../../state/file-viewer.ts";
 import { JotaiStoreScope } from "../../../../../../state/jotai-store.ts";
-import { machineBunja } from "../../../../../../state/machine-store.ts";
+import {
+  machineBunja,
+  machineStoreBunja,
+} from "../../../../../../state/machine-store.ts";
 import { WorkbenchTabIdScope } from "../../../../../../state/workbench.ts";
 import { type FileViewerImplId, isFileViewerImpl } from "./impl/index.ts";
 import { detectFileViewerImpl } from "./impl-detector/index.ts";
@@ -20,6 +23,7 @@ const FsEntryScope = createScopeFromContext(FsEntryContext);
 
 export const fileViewerBunja = bunja(() => {
   const machine = bunja.use(machineBunja);
+  const machines = bunja.use(machineStoreBunja);
   const tabId = requireWorkbenchTabId(bunja.use(WorkbenchTabIdScope));
   const fsEntry = requireFsEntry(bunja.use(FsEntryScope));
   const store = bunja.use(JotaiStoreScope);
@@ -61,7 +65,11 @@ export const fileViewerBunja = bunja(() => {
     let cancelled = false;
     store.set(stateAtom, { phase: "detecting" });
     void (async () => {
-      const result = await detectFileViewerImpl(currentMachine, fsEntry);
+      const result = await detectFileViewerImpl(
+        currentMachine,
+        fsEntry,
+        machines.rpcCallOptions(),
+      );
       if (cancelled) return;
       store.set(stateAtom, {
         phase: "ready",
@@ -79,6 +87,7 @@ export const fileViewerBunja = bunja(() => {
     fsEntry,
     implAtom,
     machineAtom: machine.machineAtom,
+    rpcCallOptions: machines.rpcCallOptions,
     stateAtom,
     tabId,
   };
