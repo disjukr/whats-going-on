@@ -3,8 +3,8 @@
 param(
   [string]$Version,
   [string]$OutDir,
-  [string]$PackageIdentityName = "WhatsGoingOn.Daemon",
-  [string]$Publisher = "CN=JongChan Choi",
+  [string]$PackageIdentityName = "JongChanChoi.WhatsGoingOn",
+  [string]$Publisher = "CN=A4D057B4-3412-495C-B2DA-D651AD80D736",
   [string]$PublisherDisplayName = "JongChan Choi",
   [string]$CertificatePath,
   [string]$CertificatePassword,
