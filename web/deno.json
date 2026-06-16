@@ -2,7 +2,7 @@
   "nodeModulesDir": "auto",
   "tasks": {
     "dev": "deno run -A npm:vite@^6.0.0 --host 0.0.0.0",
-    "build": "deno run -A npm:typescript@^5.9.0/tsc -b && deno run -A npm:vite@^6.0.0 build",
+    "build": "deno run -A npm:vite@^6.0.0 build",
     "check": "deno task check:tools && deno run -A npm:typescript@^5.9.0/tsc -b",
     "check:daemon": "deno run --unstable-net --allow-net --allow-read=.. src/tools/check-daemon.ts",
     "check:tools": "deno check --unstable-net src/tools/check-daemon.ts",
