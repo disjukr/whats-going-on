@@ -49,6 +49,23 @@ pub fn confirm_pairing_request(model: &PairingConfirmationModel) -> Result<bool>
     }
 }
 
+pub fn show_confirmation_window(title: &str, message: &str) -> Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(macos_alert::show_confirm(title, message));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        println!("{title}\n{message}");
+        Ok(false)
+    }
+}
+
+pub fn show_message_window(title: &str, message: &str) -> Result<()> {
+    show_info_window(title, message)
+}
+
 pub fn show_machine_info_window(config_path: &Path) -> Result<()> {
     let config = load_or_default(config_path)?;
     show_info_window(

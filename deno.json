@@ -2,6 +2,7 @@
   "tasks": {
     "macos:dev:daemons": "./scripts/macos/dev-daemons.sh",
     "macos:kill:daemons": "./scripts/macos/kill-daemons.sh",
+    "macos:package:daemon": "./scripts/macos/package-daemon-dmg.sh",
     "macos:pair:dev": "./scripts/macos/pair-dev.sh",
     "windows:dev:daemons": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/windows/dev-daemons.ps1",
     "windows:kill:daemons": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/windows/kill-daemons.ps1",

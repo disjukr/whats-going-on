@@ -144,3 +144,46 @@ package and is not removed by MSIX uninstall.
 
 For production signing, pass `-CertificatePath` and `-CertificatePassword` to
 `scripts/windows/package-daemon.ps1`.
+
+## macOS Packaging
+
+Build a macOS app bundle and DMG:
+
+```sh
+deno task macos:package:daemon
+```
+
+The DMG contains `Whats Going On.app` and an `/Applications` shortcut, laid out
+for the usual drag-to-install flow. The app bundle is the per-user tray app and
+installer controller.
+
+On first launch from the DMG, the app prompts to install itself. Accepting the
+prompt copies the app to `/Applications`, installs the privileged system daemon
+under `/Library/Application Support/wgo/bin`, installs the LaunchDaemon and
+LaunchAgent plists, and starts the daemon pair. macOS asks for an administrator
+password because the system daemon runs through `/Library/LaunchDaemons`.
+
+The app bundle also exposes Docker Desktop-style CLI entry points:
+
+```sh
+/Applications/Whats Going On.app/Contents/MacOS/install
+/Applications/Whats Going On.app/Contents/MacOS/uninstall
+```
+
+The installed system config lives at:
+
+```sh
+/Library/Application Support/wgo/wgo.yaml
+```
+
+Logs are written under:
+
+```sh
+/Library/Logs/wgo
+```
+
+For Developer ID signing, pass a signing identity to the script:
+
+```sh
+scripts/macos/package-daemon-dmg.sh --sign "Developer ID Application: Example"
+```

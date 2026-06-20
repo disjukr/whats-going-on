@@ -222,7 +222,26 @@ fn active_user_socket_path() -> PathBuf {
     if let Some(uid) = std::env::var_os("SUDO_UID").filter(|uid| !uid.is_empty()) {
         return socket_path_for_uid(uid.to_string_lossy());
     }
+    #[cfg(target_os = "macos")]
+    if let Some(uid) = console_user_uid() {
+        return socket_path_for_uid(uid);
+    }
     current_user_socket_path()
+}
+
+#[cfg(target_os = "macos")]
+fn console_user_uid() -> Option<String> {
+    let output = std::process::Command::new("stat")
+        .args(["-f", "%u", "/dev/console"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|uid| uid.trim().to_string())
+        .filter(|uid| !uid.is_empty() && uid != "0")
 }
 
 fn current_user_socket_path() -> PathBuf {

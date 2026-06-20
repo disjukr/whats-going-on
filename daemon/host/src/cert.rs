@@ -240,6 +240,12 @@ fn tailscale_exe_candidates() -> Vec<PathBuf> {
                     .join("tailscale.exe"),
             );
         }
+    } else if cfg!(target_os = "macos") {
+        candidates.push(PathBuf::from("/usr/local/bin/tailscale"));
+        candidates.push(PathBuf::from("/opt/homebrew/bin/tailscale"));
+        candidates.push(PathBuf::from(
+            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        ));
     }
     candidates
 }

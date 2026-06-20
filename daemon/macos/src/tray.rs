@@ -9,6 +9,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
 use wgo_daemon_core::config::{generated_default_system_config, load_or_default, save};
 
+use crate::installer::uninstall_or_prompt;
 use crate::ipc::{
     spawn_pairing_notification_server, PairingConfirmationRequest, PairingIpcRequest,
     PairingNotification,
@@ -20,6 +21,7 @@ use crate::pairing_ui::{
 
 const CMD_SHOW_MACHINE_INFO: &str = "show-machine-info";
 const CMD_OPEN_SETTINGS: &str = "open-settings";
+const CMD_UNINSTALL: &str = "uninstall";
 const CMD_QUIT: &str = "quit";
 const CONFIG_NOT_READY_MESSAGE: &str =
     "Machine config is not ready. Set a .ts.net domain or TLS certificate files first.";
@@ -120,9 +122,10 @@ fn create_menu() -> Result<Menu> {
         None,
     );
     let settings = MenuItem::with_id(MenuId::new(CMD_OPEN_SETTINGS), "Settings", true, None);
+    let uninstall = MenuItem::with_id(MenuId::new(CMD_UNINSTALL), "Uninstall...", true, None);
     let separator = PredefinedMenuItem::separator();
     let quit = MenuItem::with_id(MenuId::new(CMD_QUIT), "Quit", true, None);
-    menu.append_items(&[&machine_info, &settings, &separator, &quit])?;
+    menu.append_items(&[&machine_info, &settings, &uninstall, &separator, &quit])?;
     Ok(menu)
 }
 
@@ -134,6 +137,13 @@ fn handle_menu_event(config_path: &Path, id: &MenuId, control_flow: &mut Control
                 let _ = show_error_window(&format!("Failed to open settings:\n\n{err}"));
             }
         }
+        CMD_UNINSTALL => match uninstall_or_prompt() {
+            Ok(true) => *control_flow = ControlFlow::Exit,
+            Ok(false) => {}
+            Err(err) => {
+                let _ = show_error_window(&format!("Failed to uninstall:\n\n{err}"));
+            }
+        },
         CMD_QUIT => *control_flow = ControlFlow::Exit,
         _ => {}
     }
