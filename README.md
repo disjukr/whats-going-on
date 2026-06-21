@@ -106,14 +106,53 @@ deno task dev
 
 ## Windows Packaging
 
-Build a Windows daemon MSIX package:
+Build an unsigned Windows daemon MSI package:
 
 ```sh
 deno task windows:package:daemon
 ```
 
-The script stages `wgo-windows-system.exe`, `wgo-windows-user.exe`, generated
-app icons, and an `AppxManifest.xml`, then invokes the Windows SDK
+The default Windows packaging task uses WiX Toolset to write
+`dist/windows/wgo-windows-daemon-<version>.msi`. Install the .NET SDK first; the
+script restores the repo-local WiX CLI tool and required WiX extensions
+automatically when `wix` is not already on `PATH`.
+
+```sh
+dotnet tool restore
+deno task windows:package:daemon
+```
+
+Install the MSI from an elevated prompt, or double-click it and accept the UAC
+prompt:
+
+```sh
+msiexec /i .\dist\windows\wgo-windows-daemon-0.1.0.msi
+```
+
+The MSI installs `wgo-windows-system.exe` and `wgo-windows-user.exe` under
+`%ProgramFiles%\WhatsGoingOn`, registers `wgo-windows-system` as an automatic
+LocalSystem service, starts the service during install, launches the tray app
+once when install finishes, creates a Start Menu shortcut for the tray app, and
+adds an HKLM Run entry so the tray app starts on user logon. The installer uses
+the standard WiX wizard UI, including a completion dialog. Daemon data under
+`%ProgramData%\WhatsGoingOn` is intentionally outside the install directory and
+is not removed by uninstall.
+
+The MSI is intentionally unsigned for now. Windows may still show an unknown
+publisher or SmartScreen warning for downloaded installers, but MSI packaging
+does not require trusting a development certificate before install.
+
+Uninstall any earlier MSIX package before installing the MSI because both
+packages own the same Windows service name.
+
+Build the older development MSIX package:
+
+```sh
+deno task windows:package:daemon:msix
+```
+
+The MSIX script stages `wgo-windows-system.exe`, `wgo-windows-user.exe`,
+generated app icons, and an `AppxManifest.xml`, then invokes the Windows SDK
 `MakeAppx.exe` tool. By default it also creates a development code-signing
 certificate and signs the package. The generated `.cer` must be trusted on the
 test machine before the MSIX can be installed. The trust task requests elevation
@@ -123,15 +162,12 @@ when needed:
 deno task windows:trust:daemon:dev-cert
 ```
 
-```powershell
+```sh
 Add-AppxPackage .\dist\windows\wgo-windows-daemon-0.1.0.msix
-Start-Process 'shell:AppsFolder\Disjukr.WhatsGoingOn_fbgb9hhrc8qtr!WgoUser'
 ```
 
-Install from an elevated PowerShell session because the package declares a
-LocalSystem service. The packaged startup task starts the tray app on user
-logon; launch the app once after installing if you want the tray icon
-immediately.
+After installing, launch Whats Going On from the Start menu once if you want the
+tray icon immediately.
 
 Passing `-SkipSign` writes `wgo-windows-daemon-0.1.0.unsigned.msix` so it cannot
 accidentally replace the signed installable package.
