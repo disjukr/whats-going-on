@@ -1,18 +1,6 @@
 import { KeyRound, RefreshCw, Settings, Trash2, Unlink } from "lucide-react";
 import type { Machine } from "../../state/machines.ts";
-
-const machineContextMenuClassName = [
-  "fixed z-[30] grid gap-[2px] w-[176px] border border-[#d8dde7]",
-  "rounded-[8px] bg-white [box-shadow:0_18px_48px_rgb(32_36_45_/_24%)] p-[6px]",
-  "[&_button]:inline-flex [&_button]:appearance-none [&_button]:items-center",
-  "[&_button]:justify-start [&_button]:gap-[7px] [&_button]:[font-family:inherit]",
-  "[&_button]:w-full [&_button]:min-h-[34px]",
-  "[&_button]:cursor-pointer [&_button]:border-0 [&_button]:rounded-[6px] [&_button]:bg-transparent",
-  "[&_button]:px-[10px] [&_button]:text-[#20242d]",
-  "[&_button:hover]:bg-[#f2f6ff]",
-  "[&_button.danger]:text-[#b42318]",
-  "[&_button.danger:hover]:bg-[#fff2f0]",
-].join(" ");
+import { FloatingMenu, FloatingMenuItem } from "../ui/floating-menu.tsx";
 
 export interface MachineMenuPosition {
   x: number;
@@ -43,58 +31,46 @@ export function MachineContextMenu(
   const isPaired = Boolean(machine.clientId && machine.clientSecret);
 
   return (
-    <div
-      className={machineContextMenuClassName}
-      style={{ left: menu.x, top: menu.y }}
-      role="menu"
-      onMouseDown={(event) => event.stopPropagation()}
+    <FloatingMenu
+      className="z-[30] w-[176px]"
+      position={{ left: menu.x, top: menu.y }}
     >
-      <button
-        type="button"
-        role="menuitem"
+      <FloatingMenuItem
         onClick={onReconnect}
       >
         <RefreshCw size={15} />
         Reconnect
-      </button>
-      <button
-        type="button"
-        role="menuitem"
+      </FloatingMenuItem>
+      <FloatingMenuItem
         onClick={() => onConfigure(machine)}
       >
         <Settings size={15} />
         Configure
-      </button>
+      </FloatingMenuItem>
       {!isPaired
         ? (
-          <button
-            type="button"
-            role="menuitem"
+          <FloatingMenuItem
             onClick={() => onPair(machine)}
           >
             <KeyRound size={15} />
             Pair
-          </button>
+          </FloatingMenuItem>
         )
         : (
-          <button
-            type="button"
-            role="menuitem"
+          <FloatingMenuItem
             onClick={() => onUnpair(machine)}
           >
             <Unlink size={15} />
             Unpair
-          </button>
+          </FloatingMenuItem>
         )}
-      <button
-        type="button"
-        role="menuitem"
-        className="danger"
+      <FloatingMenuItem
+        danger
         onClick={() => onDelete(machine)}
       >
         <Trash2 size={15} />
         Delete
-      </button>
-    </div>
+      </FloatingMenuItem>
+    </FloatingMenu>
   );
 }

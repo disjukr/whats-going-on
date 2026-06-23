@@ -33,6 +33,11 @@ import {
 import { WorkbenchTabItem } from "./tab-item.tsx";
 import { className } from "../../class-name.ts";
 import { Button } from "../../ui/button.tsx";
+import {
+  FloatingMenu,
+  FloatingMenuItem,
+  useFloatingMenuDismiss,
+} from "../../ui/floating-menu.tsx";
 
 interface WorkbenchPaneViewProps {
   nodeId: string;
@@ -68,18 +73,6 @@ const compactIconButtonClassName =
 const buttonGroupFirstClassName = "!rounded-l-[4px] !rounded-r-0";
 const buttonGroupMiddleClassName = "-ml-px !rounded-0";
 const buttonGroupLastClassName = "-ml-px !rounded-l-0 !rounded-r-[4px]";
-const newTabMenuClassName = [
-  "absolute top-[calc(100%+5px)] right-0 z-[12] w-[148px]",
-  "border border-[#d8dde7] rounded-[7px] bg-white",
-  "[box-shadow:0_14px_36px_rgb(32_36_45_/_20%)] p-[5px]",
-  "[&_button]:inline-flex [&_button]:appearance-none [&_button]:items-center",
-  "[&_button]:justify-start [&_button]:gap-[7px] [&_button]:[font-family:inherit]",
-  "[&_button]:w-full [&_button]:min-h-[30px]",
-  "[&_button]:cursor-pointer [&_button]:border-0 [&_button]:rounded-[5px] [&_button]:bg-transparent",
-  "[&_button]:px-[8px] [&_button]:text-[#20242d]",
-  "[&_button]:text-[12px] [&_button]:font-650",
-  "[&_button:hover]:bg-[#eef3fb]",
-].join(" ");
 const workbenchPaneBodyClassName = [
   "workbench-pane-body relative w-full h-full min-w-0 min-h-0 overflow-visible",
   "before:content-[''] before:absolute before:z-[4]",
@@ -134,28 +127,11 @@ export function WorkbenchPaneView(
     tabDropTarget !== undefined ||
     tabSplitDropSide !== undefined;
 
-  useEffect(() => {
-    if (!newTabMenuOpen) return;
-
-    function closeNewTabMenu(event: MouseEvent) {
-      const target = event.target;
-      if (target instanceof Node && newTabMenuRef.current?.contains(target)) {
-        return;
-      }
-      setNewTabMenuOpen(false);
-    }
-
-    function closeNewTabMenuOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") setNewTabMenuOpen(false);
-    }
-
-    globalThis.addEventListener("mousedown", closeNewTabMenu);
-    globalThis.addEventListener("keydown", closeNewTabMenuOnEscape);
-    return () => {
-      globalThis.removeEventListener("mousedown", closeNewTabMenu);
-      globalThis.removeEventListener("keydown", closeNewTabMenuOnEscape);
-    };
-  }, [newTabMenuOpen]);
+  useFloatingMenuDismiss(
+    newTabMenuOpen,
+    newTabMenuRef,
+    () => setNewTabMenuOpen(false),
+  );
 
   useEffect(() => {
     if (!hasTabDragState) return;
@@ -429,32 +405,32 @@ export function WorkbenchPaneView(
               </Button>
               {newTabMenuOpen
                 ? (
-                  <div className={newTabMenuClassName} role="menu">
-                    <button
-                      type="button"
-                      role="menuitem"
+                  <FloatingMenu
+                    className="top-[calc(100%+5px)] right-0 z-[12] w-[148px]"
+                    strategy="absolute"
+                  >
+                    <FloatingMenuItem
+                      className="font-650"
                       onClick={openDaemonTab}
                     >
                       <Info size={14} />
                       Daemon
-                    </button>
-                    <button
-                      type="button"
-                      role="menuitem"
+                    </FloatingMenuItem>
+                    <FloatingMenuItem
+                      className="font-650"
                       onClick={openFilesTab}
                     >
                       <Folder size={14} />
                       Files
-                    </button>
-                    <button
-                      type="button"
-                      role="menuitem"
+                    </FloatingMenuItem>
+                    <FloatingMenuItem
+                      className="font-650"
                       onClick={openTerminalTab}
                     >
                       <Terminal size={14} />
                       Terminal
-                    </button>
-                  </div>
+                    </FloatingMenuItem>
+                  </FloatingMenu>
                 )
                 : null}
             </div>

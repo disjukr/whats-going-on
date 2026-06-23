@@ -26,6 +26,11 @@ import { Button } from "../../../ui/button.tsx";
 import { FilesContent } from "./content/index.tsx";
 import { EntryPropertiesModal } from "./content/directory/index.tsx";
 import { FilesNavbar } from "./navbar/index.tsx";
+import {
+  clampFloatingMenuPosition,
+  FloatingMenu,
+  FloatingMenuItem,
+} from "../../../ui/floating-menu.tsx";
 
 const emptyWorkspaceClassName = [
   "grid content-center justify-items-center w-full h-full gap-[10px]",
@@ -36,24 +41,7 @@ const explorerClassName = [
   "grid [grid-template-rows:auto_minmax(0,1fr)]",
   "w-full h-full min-h-0 overflow-hidden",
 ].join(" ");
-const entryContextMenuClassName = [
-  "fixed z-[30] grid gap-[2px] w-[176px] border border-[#d8dde7]",
-  "rounded-[8px] bg-white [box-shadow:0_18px_48px_rgb(32_36_45_/_24%)] p-[6px]",
-  "[&_button]:inline-flex [&_button]:appearance-none [&_button]:items-center",
-  "[&_button]:justify-start [&_button]:gap-[7px] [&_button]:[font-family:inherit]",
-  "[&_button]:w-full [&_button]:min-h-[34px]",
-  "[&_button]:cursor-pointer [&_button]:border-0 [&_button]:rounded-[6px] [&_button]:bg-transparent",
-  "[&_button]:px-[10px] [&_button]:text-[#20242d]",
-  "[&_button:hover]:bg-[#f2f6ff]",
-].join(" ");
-const entryContextMenuViewportMargin = 8;
 const entryContextMenuWidth = 176;
-const entryContextMenuVerticalPadding = 12;
-const entryContextMenuBorderWidth = 2;
-const entryContextMenuItemHeight = 34;
-const entryContextMenuItemGap = 2;
-const dangerMenuItemClassName =
-  "!text-[#b42318] hover:!bg-[#fff2f0] hover:!text-[#912018]";
 const modalBackdropClassName =
   "fixed inset-0 z-[20] grid place-items-center bg-[rgb(32_36_45_/_42%)] p-[24px]";
 const modalClassName = [
@@ -318,34 +306,28 @@ export function FilesTool() {
 
       {entryMenu
         ? (
-          <div
-            className={entryContextMenuClassName}
-            style={{ left: entryMenu.x, top: entryMenu.y }}
-            role="menu"
-            onMouseDown={(event) => event.stopPropagation()}
+          <FloatingMenu
+            className="z-[30] w-[176px]"
+            position={{ left: entryMenu.x, top: entryMenu.y }}
           >
-            <button
-              type="button"
-              role="menuitem"
+            <FloatingMenuItem
               onClick={() => openEntryProperties(entryMenu.entry)}
             >
               <Info size={15} />
               Properties
-            </button>
+            </FloatingMenuItem>
             {currentPath
               ? (
-                <button
-                  type="button"
-                  role="menuitem"
-                  className={dangerMenuItemClassName}
+                <FloatingMenuItem
+                  danger
                   onClick={() => openDeleteEntry(entryMenu.entry)}
                 >
                   <Trash2 size={15} />
                   Delete...
-                </button>
+                </FloatingMenuItem>
               )
               : null}
-          </div>
+          </FloatingMenu>
         )
         : null}
 
@@ -378,30 +360,11 @@ function entryContextMenuPosition(
   y: number,
   hasDeleteItem: boolean,
 ): { x: number; y: number } {
-  const itemCount = hasDeleteItem ? 2 : 1;
-  const height = entryContextMenuBorderWidth +
-    entryContextMenuVerticalPadding +
-    itemCount * entryContextMenuItemHeight +
-    Math.max(0, itemCount - 1) * entryContextMenuItemGap;
-  return {
-    x: clampViewportPosition(
-      x,
-      entryContextMenuWidth,
-      globalThis.innerWidth,
-    ),
-    y: clampViewportPosition(y, height, globalThis.innerHeight),
-  };
-}
-
-function clampViewportPosition(
-  value: number,
-  size: number,
-  viewportSize: number,
-): number {
-  const min = entryContextMenuViewportMargin;
-  const max = viewportSize - size - entryContextMenuViewportMargin;
-  if (max < min) return min;
-  return Math.max(min, Math.min(value, max));
+  const position = clampFloatingMenuPosition(x, y, {
+    itemCount: hasDeleteItem ? 2 : 1,
+    width: entryContextMenuWidth,
+  });
+  return { x: position.left, y: position.top };
 }
 
 function DeleteEntryModal(
