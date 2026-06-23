@@ -30,6 +30,12 @@ const machinePanelClassName = [
   "machine-panel relative [grid-column:2] [grid-row:2] grid",
   "[grid-template-rows:auto_minmax(0,1fr)] min-w-0 min-h-0 overflow-hidden",
   "border-r border-r-[#d8dde7] rounded-tl-[16px] bg-[#fbfcfe]",
+  "[transition:border-color_180ms_ease,border-radius_180ms_ease]",
+].join(" ");
+const machinePanelInnerClassName = [
+  "grid h-full min-h-0 w-[var(--machine-panel-open-width,264px)]",
+  "min-w-[var(--machine-panel-open-width,264px)]",
+  "[grid-template-rows:auto_minmax(0,1fr)]",
 ].join(" ");
 const machinePanelSummaryClassName =
   "grid h-[48px] min-h-[48px] border-b border-b-[#d8dde7] px-[8px] py-0";
@@ -80,67 +86,65 @@ export function MachinePanel(
       className={machinePanelClassName}
       aria-label="Machine workspace"
       aria-hidden={machinePanelCollapsed}
+      inert={machinePanelCollapsed ? true : undefined}
     >
-      {!machinePanelCollapsed
-        ? (
-          <>
-            <section className={machinePanelSummaryClassName}>
-              <div className={machineTitleClassName}>
-                <h1>
-                  {machine
-                    ? (
-                      <button
-                        type="button"
-                        className={className(
-                          machineTitleButtonClassName,
-                          connection.phase === "checking" && "checking",
-                        )}
-                        onMouseDown={(event) => event.stopPropagation()}
-                        onClick={(event) => onOpenMachineMenu(event, machine)}
-                        title="Machine actions"
-                        aria-label={`${machine.name} machine actions`}
-                      >
-                        <span className={machineTitleTextClassName}>
-                          {machine.name}
-                        </span>
-                        {connection.phase === "offline"
-                          ? (
-                            <WifiOff
-                              size={14}
-                              className={machineTitleConnectionIndicatorClassName}
-                              aria-hidden="true"
-                            />
-                          )
-                          : null}
-                        <ChevronDown size={16} />
-                      </button>
-                    )
-                    : "No machine"}
-                </h1>
-              </div>
-            </section>
+      <div className={machinePanelInnerClassName}>
+        <section className={machinePanelSummaryClassName}>
+          <div className={machineTitleClassName}>
+            <h1>
+              {machine
+                ? (
+                  <button
+                    type="button"
+                    className={className(
+                      machineTitleButtonClassName,
+                      connection.phase === "checking" && "checking",
+                    )}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={(event) => onOpenMachineMenu(event, machine)}
+                    title="Machine actions"
+                    aria-label={`${machine.name} machine actions`}
+                    tabIndex={machinePanelCollapsed ? -1 : undefined}
+                  >
+                    <span className={machineTitleTextClassName}>
+                      {machine.name}
+                    </span>
+                    {connection.phase === "offline"
+                      ? (
+                        <WifiOff
+                          size={14}
+                          className={machineTitleConnectionIndicatorClassName}
+                          aria-hidden="true"
+                        />
+                      )
+                      : null}
+                    <ChevronDown size={16} />
+                  </button>
+                )
+                : "No machine"}
+            </h1>
+          </div>
+        </section>
 
-            <ToolMenu
-              activeTool={activeTool}
-              terminalShells={terminalShells}
-              onOpenTerminalShell={onOpenTerminalShell}
-              onSelect={onSelectTool}
-            />
-            <div
-              className={machinePanelResizerClassName}
-              role="separator"
-              aria-label="Resize machine panel"
-              aria-orientation="vertical"
-              aria-valuemin={machinePanelMinWidth}
-              aria-valuemax={machinePanelMaxWidth}
-              aria-valuenow={machinePanelWidth}
-              tabIndex={0}
-              onPointerDown={onResizePointerDown}
-              onKeyDown={onResizeKeyDown}
-            />
-          </>
-        )
-        : null}
+        <ToolMenu
+          activeTool={activeTool}
+          terminalShells={terminalShells}
+          onOpenTerminalShell={onOpenTerminalShell}
+          onSelect={onSelectTool}
+        />
+      </div>
+      <div
+        className={machinePanelResizerClassName}
+        role="separator"
+        aria-label="Resize machine panel"
+        aria-orientation="vertical"
+        aria-valuemin={machinePanelMinWidth}
+        aria-valuemax={machinePanelMaxWidth}
+        aria-valuenow={machinePanelWidth}
+        tabIndex={machinePanelCollapsed ? -1 : 0}
+        onPointerDown={onResizePointerDown}
+        onKeyDown={onResizeKeyDown}
+      />
     </aside>
   );
 }

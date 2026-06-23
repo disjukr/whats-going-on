@@ -18,13 +18,12 @@ const appShellClassName = [
   "app-shell grid h-full min-h-0 overflow-hidden bg-[#242832]",
   "[grid-template-columns:48px_var(--machine-panel-width,264px)_minmax(0,1fr)]",
   "[grid-template-rows:auto_minmax(0,1fr)]",
+  "[&.machine-panel-transitioning]:[transition:grid-template-columns_180ms_ease]",
   "max-[980px]:[grid-template-columns:48px_var(--machine-panel-width,236px)_minmax(0,1fr)]",
   "max-[680px]:[grid-template-columns:48px_var(--machine-panel-width,212px)_minmax(0,1fr)]",
-  "[&.machine-panel-collapsed]:[grid-template-columns:48px_0_minmax(0,1fr)]",
-  "[&.machine-panel-collapsed_.machine-panel]:invisible",
+  "[&.machine-panel-collapsed_.machine-panel]:pointer-events-none",
   "[&.machine-panel-collapsed_.machine-panel]:border-r-0",
   "[&.machine-panel-collapsed_.machine-panel]:rounded-tl-0",
-  "[&.machine-panel-collapsed_.workbench]:[grid-column:2/-1]",
   "[&.machine-panel-collapsed_.workbench]:rounded-tl-[8px]",
 ].join(" ");
 
@@ -52,15 +51,23 @@ function Layout({ children }: LayoutProps) {
   const machinePanelCollapsed = useAtomValue(
     layout.machinePanelCollapsedAtom,
   );
+  const machinePanelTransitioning = useAtomValue(
+    layout.machinePanelTransitioningAtom,
+  );
   const machinePanelWidth = useAtomValue(layout.machinePanelWidthAtom);
+
   return (
     <main
       className={className(
         appShellClassName,
         machinePanelCollapsed && "machine-panel-collapsed",
+        machinePanelTransitioning && "machine-panel-transitioning",
       )}
       style={{
-        "--machine-panel-width": `${machinePanelWidth}px`,
+        "--machine-panel-width": machinePanelCollapsed
+          ? "0px"
+          : `${machinePanelWidth}px`,
+        "--machine-panel-open-width": `${machinePanelWidth}px`,
       } as React.CSSProperties}
     >
       {children}

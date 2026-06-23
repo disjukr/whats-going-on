@@ -10,6 +10,7 @@ import { className } from "../class-name.ts";
 const workbenchClassName = [
   "workbench [grid-column:3] [grid-row:2]",
   "min-w-0 min-h-0 overflow-hidden bg-white",
+  "[transition:border-radius_180ms_ease]",
 ].join(" ");
 const inlineMachineSetupClassName = [
   "grid content-center justify-items-center min-h-0 overflow-auto p-[24px]",

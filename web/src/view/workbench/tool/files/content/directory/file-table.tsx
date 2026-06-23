@@ -52,6 +52,7 @@ const readonlyClassName = [
 ].join(" ");
 const tableEmptyClassName =
   "[grid-column:1/-1] flex items-center text-[#667085] px-[12px]";
+const tableBottomPaddingClassName = "[grid-column:1/-1] h-[8rem]";
 
 export function FileTable(
   {
@@ -116,6 +117,7 @@ export function FileTable(
             </button>
           ))
         )}
+      <div className={tableBottomPaddingClassName} aria-hidden="true" />
     </div>
   );
 }

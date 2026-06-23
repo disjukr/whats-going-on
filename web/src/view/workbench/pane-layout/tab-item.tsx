@@ -39,7 +39,7 @@ interface WorkbenchTabItemProps {
 
 const workbenchTabClassName = [
   "workbench-tab relative flex items-center min-w-0 max-w-[168px] h-full box-border leading-[1.6]",
-  "border-r border-r-[#e4e8ef] bg-[#eef1f5]",
+  "bg-[#eef1f5]",
   "before:content-[''] before:absolute before:top-[4px] before:bottom-[4px]",
   "before:z-[2] before:w-[2px] before:rounded-full before:bg-transparent",
   "before:pointer-events-none before:left-0",
@@ -49,6 +49,7 @@ const workbenchTabClassName = [
   "[&.drop-before::before]:bg-[#4f8cff]",
   "[&.drop-after::after]:bg-[#4f8cff]",
   "[&.dragging]:opacity-48",
+  "[&:not(.active)]:[box-shadow:inset_-1px_0_0_#e4e8ef]",
   "[&.active]:bg-white",
   "[&>button]:inline-flex [&>button]:appearance-none [&>button]:items-center",
   "[&>button]:justify-center [&>button]:[font-family:inherit] [&>button]:leading-[1.6]",
