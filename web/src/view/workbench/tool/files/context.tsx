@@ -34,6 +34,7 @@ export interface FilesActions {
     entry: FsEntry,
     event: React.MouseEvent<HTMLButtonElement>,
   ) => void;
+  openFolderMenu: (event: React.MouseEvent<HTMLDivElement>) => void;
   selectEntry: (entry: FsEntry) => void;
 }
 

@@ -18,6 +18,7 @@ interface FileTableProps {
     entry: FsEntry,
     event: React.MouseEvent<HTMLButtonElement>,
   ) => void;
+  onFolderContextMenu: (event: React.MouseEvent<HTMLDivElement>) => void;
 }
 
 const fileTableClassName = [
@@ -61,19 +62,41 @@ export function FileTable(
     onSelect,
     onOpen,
     onContextMenu,
+    onFolderContextMenu,
   }: FileTableProps,
 ) {
+  function openFolderContextMenu(event: React.MouseEvent<HTMLDivElement>) {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest("[data-file-table-row], [data-file-table-head]")) {
+      return;
+    }
+    onFolderContextMenu(event);
+  }
+
   return (
-    <div className={fileTableClassName} role="grid" aria-label="Files">
-      <div className={`${fileHeadClassName} name`}>Name</div>
-      <div className={`${fileHeadClassName} kind`}>Kind</div>
-      <div className={`${fileHeadClassName} size`}>Size</div>
+    <div
+      className={fileTableClassName}
+      role="grid"
+      aria-label="Files"
+      onContextMenu={openFolderContextMenu}
+    >
+      <div className={`${fileHeadClassName} name`} data-file-table-head>
+        Name
+      </div>
+      <div className={`${fileHeadClassName} kind`} data-file-table-head>
+        Kind
+      </div>
+      <div className={`${fileHeadClassName} size`} data-file-table-head>
+        Size
+      </div>
       <div
         className={className(
           fileHeadClassName,
           "modified",
           hideInNarrowContainerClassName,
         )}
+        data-file-table-head
       >
         Modified
       </div>
@@ -91,6 +114,7 @@ export function FileTable(
               onClick={() => onSelect(entry)}
               onDoubleClick={() => onOpen(entry)}
               onContextMenu={(event) => onContextMenu(entry, event)}
+              data-file-table-row
             >
               <span className={fileNameCellClassName}>
                 <EntryIcon entry={entry} />

@@ -1,12 +1,23 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useAtomValue } from "jotai";
 import { useBunja } from "bunja/react";
-import { HardDrive, Info, KeyRound, Loader2, Trash2, X } from "lucide-react";
 import {
+  HardDrive,
+  Info,
+  KeyRound,
+  Loader2,
+  SquareTerminal,
+  Trash2,
+  X,
+} from "lucide-react";
+import {
+  type AvailableShellInfo,
+  type AvailableShellsTableEvent,
   DeleteMode,
   deletePaths,
   FsEntry,
   FsEntryKind,
+  subscribeAvailableShells,
 } from "../../../../protocol/rpc.ts";
 import { connectionBunja } from "../../../../state/connection.ts";
 import {
@@ -16,7 +27,10 @@ import {
 } from "../../../../state/explorer.ts";
 import { machineModalBunja } from "../../../../state/machine-modal.ts";
 import { machineStoreBunja } from "../../../../state/machine-store.ts";
-import { workbenchTabBunja } from "../../../../state/workbench.ts";
+import {
+  workbenchBunja,
+  workbenchTabBunja,
+} from "../../../../state/workbench.ts";
 import {
   type FilesActions,
   FilesActionsContext,
@@ -81,6 +95,11 @@ interface EntryMenuState {
   y: number;
 }
 
+interface FolderMenuState {
+  x: number;
+  y: number;
+}
+
 interface DeleteEntryState {
   entry: FsEntry;
   error?: string;
@@ -100,6 +119,7 @@ export function FilesTool() {
   const machine = useAtomValue(machineStore.selectedAtom);
   const isPaired = useAtomValue(machineStore.selectedIsPairedAtom);
   const connectionEpoch = useAtomValue(connectionState.connectionEpochAtom);
+  const workbench = useBunja(workbenchBunja);
   const tabState = useBunja(workbenchTabBunja);
   const explorer = useBunja(explorerBunja, [
     ExplorerPaneScope.bind(tabState.tabId),
@@ -107,8 +127,12 @@ export function FilesTool() {
   const openedFile = useAtomValue(explorer.openedFileAtom);
   const lastConnectionEpochRef = useRef(connectionEpoch);
   const [entryMenu, setEntryMenu] = useState<EntryMenuState>();
+  const [folderMenu, setFolderMenu] = useState<FolderMenuState>();
   const [propertiesEntry, setPropertiesEntry] = useState<FsEntry>();
   const [deleteEntry, setDeleteEntry] = useState<DeleteEntryState>();
+  const [terminalShells, setTerminalShells] = useState<AvailableShellInfo[]>(
+    [],
+  );
 
   useEffect(() => {
     if (lastConnectionEpochRef.current === connectionEpoch) return;
@@ -117,10 +141,11 @@ export function FilesTool() {
   }, [connectionEpoch, explorer]);
 
   useEffect(() => {
-    if (!entryMenu) return;
+    if (!entryMenu && !folderMenu) return;
 
     function closeMenu() {
       setEntryMenu(undefined);
+      setFolderMenu(undefined);
     }
 
     function closeMenuOnEscape(event: KeyboardEvent) {
@@ -133,7 +158,41 @@ export function FilesTool() {
       globalThis.removeEventListener("mousedown", closeMenu);
       globalThis.removeEventListener("keydown", closeMenuOnEscape);
     };
-  }, [entryMenu]);
+  }, [entryMenu, folderMenu]);
+
+  useEffect(() => {
+    if (!machine || !isPaired) {
+      setTerminalShells([]);
+      return;
+    }
+
+    let cancelled = false;
+    const iterator = subscribeAvailableShells(
+      machine,
+      machineStore.rpcCallOptions(),
+    );
+    void (async () => {
+      try {
+        for await (const event of iterator) {
+          if (cancelled) return;
+          if (event.type === "snapshot") {
+            setTerminalShells(event.rows);
+          } else {
+            setTerminalShells((current) =>
+              applyAvailableShellPatch(current, event)
+            );
+          }
+        }
+      } catch {
+        if (!cancelled) setTerminalShells([]);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      void iterator.return(undefined);
+    };
+  }, [connectionEpoch, isPaired, machine, machineStore]);
 
   useEffect(() => {
     if (!propertiesEntry) return;
@@ -202,6 +261,7 @@ export function FilesTool() {
     event.preventDefault();
     event.stopPropagation();
     selectEntry(entry);
+    setFolderMenu(undefined);
     setEntryMenu({
       entry,
       ...entryContextMenuPosition(
@@ -212,6 +272,15 @@ export function FilesTool() {
     });
   }
 
+  function openFolderMenu(event: React.MouseEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setEntryMenu(undefined);
+    setFolderMenu(
+      folderContextMenuPosition(event.clientX, event.clientY),
+    );
+  }
+
   function openEntryProperties(entry: FsEntry) {
     setEntryMenu(undefined);
     setPropertiesEntry(entry);
@@ -220,6 +289,22 @@ export function FilesTool() {
   function openDeleteEntry(entry: FsEntry) {
     setEntryMenu(undefined);
     setDeleteEntry({ entry, isDeleting: false });
+  }
+
+  function openTerminalHere() {
+    setFolderMenu(undefined);
+    if (!currentPath) return;
+    const shell = terminalShells.find((item) => item.isDefault) ??
+      terminalShells[0];
+    if (!shell) return;
+    workbench.openTerminalTab({
+      cwd: currentPath,
+      launch: {
+        command: shell.command,
+        args: shell.args,
+      },
+      title: shell.name,
+    });
   }
 
   async function deleteSelectedEntry() {
@@ -267,6 +352,7 @@ export function FilesTool() {
     navigate: navigateFromToolbar,
     openEntry: openTableEntry,
     openEntryMenu,
+    openFolderMenu,
     selectEntry,
   };
 
@@ -331,6 +417,23 @@ export function FilesTool() {
         )
         : null}
 
+      {folderMenu
+        ? (
+          <FloatingMenu
+            className="z-[30] w-[176px]"
+            position={{ left: folderMenu.x, top: folderMenu.y }}
+          >
+            <FloatingMenuItem
+              disabled={!currentPath || terminalShells.length === 0}
+              onClick={openTerminalHere}
+            >
+              <SquareTerminal size={15} />
+              Open terminal here
+            </FloatingMenuItem>
+          </FloatingMenu>
+        )
+        : null}
+
       {propertiesEntry
         ? (
           <EntryPropertiesModal
@@ -365,6 +468,30 @@ function entryContextMenuPosition(
     width: entryContextMenuWidth,
   });
   return { x: position.left, y: position.top };
+}
+
+function folderContextMenuPosition(
+  x: number,
+  y: number,
+): { x: number; y: number } {
+  const position = clampFloatingMenuPosition(x, y, {
+    itemCount: 1,
+    width: entryContextMenuWidth,
+  });
+  return { x: position.left, y: position.top };
+}
+
+function applyAvailableShellPatch(
+  current: AvailableShellInfo[],
+  event: Extract<AvailableShellsTableEvent, { type: "patch" }>,
+): AvailableShellInfo[] {
+  const removeIds = new Set(event.removes.map((item) => item.shellId));
+  const retained = current.filter((shell) => !removeIds.has(shell.shellId));
+  const upserts = new Map(event.upserts.map((shell) => [shell.shellId, shell]));
+  return [
+    ...retained.filter((shell) => !upserts.has(shell.shellId)),
+    ...event.upserts,
+  ];
 }
 
 function DeleteEntryModal(

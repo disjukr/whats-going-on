@@ -41,6 +41,7 @@ export function DirectoryContent() {
           onSelect={actions.selectEntry}
           onOpen={actions.openEntry}
           onContextMenu={actions.openEntryMenu}
+          onFolderContextMenu={actions.openFolderMenu}
         />
         <Inspector entry={selectedEntry} currentPath={currentPath} />
       </div>
