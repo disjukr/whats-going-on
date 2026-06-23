@@ -3,12 +3,11 @@ import { useAtomValue } from "jotai";
 import { useBunja } from "bunja/react";
 import { Handle, useLayout } from "panecake";
 import {
-  ChevronDown,
   Columns2,
   Folder,
   GripVertical,
   Info,
-  Plus,
+  MoreHorizontal,
   Rows2,
   Terminal,
   X,
@@ -41,6 +40,7 @@ import {
 
 interface WorkbenchPaneViewProps {
   nodeId: string;
+  topRight: boolean;
 }
 
 const workbenchPaneClassName = [
@@ -61,18 +61,16 @@ const workbenchTabsClassName = [
 const paneActionsClassName = "flex items-center";
 const paneActionButtonGroupClassName =
   "inline-flex h-[1.6rem] items-center box-border p-[2px]";
-const newTabMenuWrapClassName = "relative flex h-full";
-const iconButtonClassName = [
-  "!w-[36px] !min-w-[36px] !p-0",
-].join(" ");
-const newTabTriggerClassName = [
-  "!w-[1.8em] !min-w-[1.8em] !h-full !min-h-0 !box-border !gap-[1px] !p-0",
-].join(" ");
+const paneOverflowMenuWrapClassName = "relative flex h-full";
 const compactIconButtonClassName =
   "!w-[1.6em] !min-w-[1.6em] !h-full !min-h-0 !box-border !p-0";
 const buttonGroupFirstClassName = "!rounded-l-[4px] !rounded-r-0";
-const buttonGroupMiddleClassName = "-ml-px !rounded-0";
 const buttonGroupLastClassName = "-ml-px !rounded-l-0 !rounded-r-[4px]";
+const standaloneButtonClassName = "!rounded-[4px]";
+const paneOverflowMenuClassName =
+  "top-[calc(100%+5px)] right-0 z-[12] w-[172px]";
+const paneOverflowMenuSectionClassName = "border-t border-t-[#e4e8ef]";
+const paneOverflowMenuItemClassName = "font-650";
 const workbenchPaneBodyClassName = [
   "workbench-pane-body relative w-full h-full min-w-0 min-h-0 overflow-visible",
   "before:content-[''] before:absolute before:z-[4]",
@@ -104,6 +102,7 @@ const activePaneOutlineClassName = [
 export function WorkbenchPaneView(
   {
     nodeId,
+    topRight,
   }: WorkbenchPaneViewProps,
 ) {
   const machineStore = useBunja(machineStoreBunja);
@@ -115,22 +114,22 @@ export function WorkbenchPaneView(
   const paneCount = useAtomValue(paneState.paneCountAtom);
   const active = useAtomValue(paneState.activeAtom);
   const { removePane: removeLayoutPane, split } = useLayout();
-  const [newTabMenuOpen, setNewTabMenuOpen] = useState(false);
+  const [paneOverflowMenuOpen, setPaneOverflowMenuOpen] = useState(false);
   const [draggingTabId, setDraggingTabId] = useState<string>();
   const [tabDropTarget, setTabDropTarget] = useState<WorkbenchTabDropTarget>();
   const [tabSplitDropSide, setTabSplitDropSide] = useState<
     TabSplitDropSide | undefined
   >();
-  const newTabMenuRef = useRef<HTMLDivElement>(null);
+  const paneOverflowMenuRef = useRef<HTMLDivElement>(null);
   const canClosePane = paneCount > 1;
   const hasTabDragState = draggingTabId !== undefined ||
     tabDropTarget !== undefined ||
     tabSplitDropSide !== undefined;
 
   useFloatingMenuDismiss(
-    newTabMenuOpen,
-    newTabMenuRef,
-    () => setNewTabMenuOpen(false),
+    paneOverflowMenuOpen,
+    paneOverflowMenuRef,
+    () => setPaneOverflowMenuOpen(false),
   );
 
   useEffect(() => {
@@ -151,12 +150,14 @@ export function WorkbenchPaneView(
   }, [hasTabDragState]);
 
   function splitPane(direction: "horizontal" | "vertical") {
+    setPaneOverflowMenuOpen(false);
     const newPaneId = paneState.addPane();
     split(nodeId, direction, newPaneId, "after");
   }
 
   function closePane() {
     if (!canClosePane) return;
+    setPaneOverflowMenuOpen(false);
     if (pane) closeTerminalSessions(pane.tabs);
     removeLayoutPane(nodeId);
     paneState.removePane();
@@ -206,17 +207,17 @@ export function WorkbenchPaneView(
 
   function openFilesTab() {
     paneState.addFilesTab();
-    setNewTabMenuOpen(false);
+    setPaneOverflowMenuOpen(false);
   }
 
   function openDaemonTab() {
     paneState.addDaemonTab();
-    setNewTabMenuOpen(false);
+    setPaneOverflowMenuOpen(false);
   }
 
   function openTerminalTab() {
     paneState.addTerminalTab();
-    setNewTabMenuOpen(false);
+    setPaneOverflowMenuOpen(false);
   }
 
   function moveDroppedTab(
@@ -388,86 +389,96 @@ export function WorkbenchPaneView(
         </div>
         <div className={paneActionsClassName}>
           <div className={paneActionButtonGroupClassName}>
-            <div className={newTabMenuWrapClassName} ref={newTabMenuRef}>
+            {topRight
+              ? (
+                <Button
+                  className={className(
+                    compactIconButtonClassName,
+                    buttonGroupFirstClassName,
+                  )}
+                  onClick={() => splitPane("horizontal")}
+                  title="Split right"
+                  aria-label="Split right"
+                >
+                  <Columns2 size={12} />
+                </Button>
+              )
+              : null}
+            <div
+              className={paneOverflowMenuWrapClassName}
+              ref={paneOverflowMenuRef}
+            >
               <Button
                 className={className(
-                  newTabTriggerClassName,
-                  buttonGroupFirstClassName,
+                  compactIconButtonClassName,
+                  topRight
+                    ? buttonGroupLastClassName
+                    : standaloneButtonClassName,
                 )}
-                onClick={() => setNewTabMenuOpen((open) => !open)}
-                title="Open tab"
-                aria-label="Open tab"
+                onClick={() => setPaneOverflowMenuOpen((open) => !open)}
+                title="Pane actions"
+                aria-label="Pane actions"
                 aria-haspopup="menu"
-                aria-expanded={newTabMenuOpen}
+                aria-expanded={paneOverflowMenuOpen}
               >
-                <Plus size={12} />
-                <ChevronDown size={10} />
+                <MoreHorizontal size={13} />
               </Button>
-              {newTabMenuOpen
+              {paneOverflowMenuOpen
                 ? (
                   <FloatingMenu
-                    className="top-[calc(100%+5px)] right-0 z-[12] w-[148px]"
+                    className={paneOverflowMenuClassName}
                     strategy="absolute"
                   >
                     <FloatingMenuItem
-                      className="font-650"
+                      className={paneOverflowMenuItemClassName}
                       onClick={openDaemonTab}
                     >
                       <Info size={14} />
-                      Daemon
+                      New daemon tab
                     </FloatingMenuItem>
                     <FloatingMenuItem
-                      className="font-650"
+                      className={paneOverflowMenuItemClassName}
                       onClick={openFilesTab}
                     >
                       <Folder size={14} />
-                      Files
+                      New files tab
                     </FloatingMenuItem>
                     <FloatingMenuItem
-                      className="font-650"
+                      className={paneOverflowMenuItemClassName}
                       onClick={openTerminalTab}
                     >
                       <Terminal size={14} />
-                      Terminal
+                      New terminal tab
+                    </FloatingMenuItem>
+                    <FloatingMenuItem
+                      className={className(
+                        paneOverflowMenuItemClassName,
+                        paneOverflowMenuSectionClassName,
+                      )}
+                      onClick={() => splitPane("horizontal")}
+                    >
+                      <Columns2 size={14} />
+                      Split right
+                    </FloatingMenuItem>
+                    <FloatingMenuItem
+                      className={paneOverflowMenuItemClassName}
+                      onClick={() => splitPane("vertical")}
+                    >
+                      <Rows2 size={14} />
+                      Split down
+                    </FloatingMenuItem>
+                    <FloatingMenuItem
+                      className={paneOverflowMenuItemClassName}
+                      onClick={closePane}
+                      disabled={!canClosePane}
+                    >
+                      <X size={14} />
+                      Close pane
                     </FloatingMenuItem>
                   </FloatingMenu>
                 )
                 : null}
             </div>
-            <Button
-              className={className(
-                compactIconButtonClassName,
-                buttonGroupMiddleClassName,
-              )}
-              onClick={() => splitPane("horizontal")}
-              title="Split right"
-              aria-label="Split right"
-            >
-              <Columns2 size={12} />
-            </Button>
-            <Button
-              className={className(
-                compactIconButtonClassName,
-                buttonGroupMiddleClassName,
-              )}
-              onClick={() => splitPane("vertical")}
-              title="Split down"
-              aria-label="Split down"
-            >
-              <Rows2 size={12} />
-            </Button>
-            <Button
-              className={className(
-                compactIconButtonClassName,
-                buttonGroupLastClassName,
-              )}
-              onClick={closePane}
-              disabled={!canClosePane}
-              title="Close pane"
-              aria-label="Close pane"
-            >
-              <X size={12} />
-            </Button>
           </div>
         </div>
       </header>

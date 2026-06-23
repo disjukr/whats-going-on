@@ -1,6 +1,11 @@
 import { useAtomValue } from "jotai";
 import { useBunja } from "bunja/react";
-import { Pane, Root as PaneRoot } from "panecake";
+import {
+  type LayoutNode,
+  type LayoutState,
+  Pane,
+  Root as PaneRoot,
+} from "panecake";
 import {
   workbenchBunja,
   WorkbenchPaneIdContext,
@@ -19,6 +24,7 @@ export function WorkbenchPaneLayout() {
   const workbench = useBunja(workbenchBunja);
   const layout = useAtomValue(workbench.layoutAtom);
   const panes = useAtomValue(workbench.panesAtom);
+  const topRightNodeId = topRightLeafNodeId(layout);
 
   return (
     <PaneRoot
@@ -32,11 +38,32 @@ export function WorkbenchPaneLayout() {
         <Pane key={pane.id} id={pane.id} minWidth={320} minHeight={220}>
           {(nodeId) => (
             <WorkbenchPaneIdContext value={pane.id}>
-              <WorkbenchPaneView nodeId={nodeId} />
+              <WorkbenchPaneView
+                nodeId={nodeId}
+                topRight={nodeId === topRightNodeId}
+              />
             </WorkbenchPaneIdContext>
           )}
         </Pane>
       ))}
     </PaneRoot>
   );
+}
+
+function topRightLeafNodeId(layout: LayoutState): string | undefined {
+  if (!layout.rootId) return undefined;
+  return topRightLeafNodeIdFromNode(layout.nodes[layout.rootId], layout);
+}
+
+function topRightLeafNodeIdFromNode(
+  node: LayoutNode | undefined,
+  layout: LayoutState,
+): string | undefined {
+  if (!node) return undefined;
+  if (node.type === "leaf") return node.id;
+
+  const childId = node.direction === "horizontal"
+    ? node.children[node.children.length - 1]
+    : node.children[0];
+  return topRightLeafNodeIdFromNode(layout.nodes[childId], layout);
 }
