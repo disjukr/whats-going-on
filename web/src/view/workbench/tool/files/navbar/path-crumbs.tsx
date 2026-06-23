@@ -16,10 +16,8 @@ const pathInputFormClassName = [
 const crumbsClassName = [
   "flex items-center gap-0 w-full h-[1.6em] min-h-[1.6em] min-w-0",
   "box-border leading-[1.6]",
-  "overflow-x-auto overflow-y-hidden overscroll-x-contain [scrollbar-width:thin] cursor-text",
-  "[&::-webkit-scrollbar]:h-[6px]",
-  "[&::-webkit-scrollbar-thumb]:rounded-full",
-  "[&::-webkit-scrollbar-thumb]:bg-[#c6cfdb]",
+  "overflow-x-auto overflow-y-hidden overscroll-x-contain [scrollbar-width:none] cursor-text",
+  "[&::-webkit-scrollbar]:hidden",
   "[&_svg]:flex-[0_0_auto] [&_svg]:pointer-events-none",
   "[&_button]:inline-flex [&_button]:appearance-none [&_button]:cursor-pointer",
   "[&_button]:items-center [&_button]:flex-[0_0_auto] [&_button]:[font-family:inherit]",
@@ -59,6 +57,28 @@ export function PathCrumbs(
     });
     return () => cancelAnimationFrame(frame);
   }, [editing, path]);
+
+  useEffect(() => {
+    if (editing) return;
+    const element = crumbsRef.current;
+    if (!element) return;
+    const crumbsElement = element;
+
+    function scrollCrumbsHorizontally(event: WheelEvent) {
+      if (crumbsElement.scrollWidth <= crumbsElement.clientWidth) return;
+      const delta = event.deltaX || event.deltaY;
+      if (delta === 0) return;
+      event.preventDefault();
+      crumbsElement.scrollLeft += delta;
+    }
+
+    crumbsElement.addEventListener("wheel", scrollCrumbsHorizontally, {
+      passive: false,
+    });
+    return () => {
+      crumbsElement.removeEventListener("wheel", scrollCrumbsHorizontally);
+    };
+  }, [editing]);
 
   function beginEditing() {
     setDraftPath(path ?? "");
