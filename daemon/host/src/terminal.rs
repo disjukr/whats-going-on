@@ -7,7 +7,9 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use portable_pty::{native_pty_system, Child, CommandBuilder, ExitStatus, MasterPty, PtySize};
+use portable_pty::{
+    native_pty_system, Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize,
+};
 use tokio::sync::broadcast;
 use tracing::warn;
 use wgo_daemon_core::rpc::{
@@ -41,7 +43,7 @@ struct TerminalSession {
     info: TerminalSessionInfo,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    child: Option<Box<dyn Child + Send + Sync>>,
+    child_killer: Option<Box<dyn ChildKiller + Send + Sync>>,
     output_tx: broadcast::Sender<TerminalEvent>,
     output_buffer: VecDeque<OutputRecord>,
     retained_output_bytes: usize,
@@ -286,6 +288,7 @@ impl TerminalManager {
             .slave
             .spawn_command(command)
             .map_err(operation_failed)?;
+        let child_killer = child.clone_killer();
         drop(pair.slave);
 
         let reader = pair.master.try_clone_reader().map_err(operation_failed)?;
@@ -316,7 +319,7 @@ impl TerminalManager {
             info: info.clone(),
             master: pair.master,
             writer,
-            child: Some(child),
+            child_killer: Some(child_killer),
             output_tx,
             output_buffer: VecDeque::new(),
             retained_output_bytes: 0,
@@ -331,7 +334,8 @@ impl TerminalManager {
             .expect("terminal sessions lock poisoned")
             .insert(terminal_session_id.clone(), session.clone());
         self.broadcast_table_upsert(&info);
-        spawn_output_reader(self.clone(), terminal_session_id, reader);
+        spawn_output_reader(self.clone(), terminal_session_id.clone(), reader);
+        spawn_child_waiter(self.clone(), terminal_session_id.clone(), child);
         Ok(info)
     }
 
@@ -485,9 +489,9 @@ impl TerminalManager {
 
         let mut guard = session.lock().expect("terminal session lock poisoned");
         guard.closed = true;
-        if let Some(mut child) = guard.child.take() {
+        if let Some(mut child_killer) = guard.child_killer.take() {
             if guard.info.exit.is_none() {
-                if let Err(err) = child.kill() {
+                if let Err(err) = child_killer.kill() {
                     warn!(?err, terminal_session_id, "failed to kill terminal child");
                 }
             }
@@ -551,22 +555,15 @@ impl TerminalManager {
         true
     }
 
-    fn mark_exited(&self, terminal_session_id: &str) {
+    fn mark_exited(&self, terminal_session_id: &str, status: Option<ExitStatus>) {
         let Ok(session) = self.get_session(terminal_session_id) else {
             return;
         };
-        let child = {
-            let mut guard = session.lock().expect("terminal session lock poisoned");
-            if guard.closed || guard.info.exit.is_some() {
-                return;
-            }
-            guard.child.take()
-        };
-        let status = wait_for_child_exit(terminal_session_id, child);
         let mut guard = session.lock().expect("terminal session lock poisoned");
         if guard.closed || guard.info.exit.is_some() {
             return;
         }
+        guard.child_killer = None;
         let exit = TerminalExit {
             code: status.as_ref().map(|status| i64::from(status.exit_code())),
             signal: status
@@ -638,27 +635,27 @@ fn spawn_output_reader(
                 }
             }
         }
-        manager.mark_exited(&terminal_session_id);
     });
 }
 
-fn wait_for_child_exit(
-    terminal_session_id: &str,
-    mut child: Option<Box<dyn Child + Send + Sync>>,
-) -> Option<ExitStatus> {
-    let Some(child) = child.as_mut() else {
-        return None;
-    };
-    match child.wait() {
-        Ok(status) => Some(status),
-        Err(err) => {
-            warn!(
-                ?err,
-                terminal_session_id, "failed to wait for terminal child"
-            );
-            None
-        }
-    }
+fn spawn_child_waiter(
+    manager: TerminalManager,
+    terminal_session_id: String,
+    mut child: Box<dyn Child + Send + Sync>,
+) {
+    thread::spawn(move || {
+        let status = match child.wait() {
+            Ok(status) => Some(status),
+            Err(err) => {
+                warn!(
+                    ?err,
+                    terminal_session_id, "failed to wait for terminal child"
+                );
+                None
+            }
+        };
+        manager.mark_exited(&terminal_session_id, status);
+    });
 }
 
 fn replay_events(session: &TerminalSession, after_seq: Option<u64>) -> Vec<TerminalEvent> {

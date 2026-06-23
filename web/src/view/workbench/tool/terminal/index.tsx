@@ -11,6 +11,7 @@ import {
   createTerminalSession,
   RpcError,
   takeTerminalControl,
+  type TerminalExit,
   type TerminalEvent,
   type TerminalLaunchSpec,
   type TerminalSessionInfo,
@@ -27,7 +28,7 @@ import {
 import { Button } from "../../../ui/button.tsx";
 
 const terminalToolClassName = [
-  "grid [grid-template-rows:minmax(0,1fr)_auto]",
+  "grid [grid-template-rows:minmax(0,1fr)_auto_auto]",
   "w-full h-full min-w-0 min-h-0 overflow-hidden bg-[#0b0f16]",
 ].join(" ");
 const terminalSurfaceClassName =
@@ -54,7 +55,7 @@ const terminalFooterDetailsClassName = [
 const terminalFooterSizeClassName = "flex-[0_0_auto]";
 const terminalHostClassName =
   "w-full h-full min-w-0 min-h-0 overflow-hidden p-[8px]";
-const terminalNoticeClassName = [
+const terminalOverlayNoticeClassName = [
   "absolute inset-0 z-[2] grid place-items-center bg-[#0b0f16]",
   "px-[18px] text-center text-[#d0d5dd]",
   "[&_div]:grid [&_div]:max-w-[360px] [&_div]:justify-items-center",
@@ -62,8 +63,15 @@ const terminalNoticeClassName = [
   "[&_h2]:m-0 [&_h2]:text-[18px] [&_h2]:font-750 [&_h2]:text-[#f2f4f7]",
   "[&_p]:m-0 [&_p]:text-[13px] [&_p]:leading-[1.45]",
 ].join(" ");
+const terminalStatusNoticeClassName = [
+  "flex min-h-[1.6rem] items-center gap-[8px] border-t border-t-[#263244]",
+  "bg-[#0f1520] px-[8px] text-[0.8rem] leading-[1.6] text-[#98a2b3]",
+  "[&_strong]:flex-[0_0_auto] [&_strong]:font-650 [&_strong]:text-[#d0d5dd]",
+  "[&_span]:min-w-0 [&_span]:flex-[1_1_auto] [&_span]:overflow-hidden",
+  "[&_span]:text-ellipsis [&_span]:whitespace-nowrap",
+].join(" ");
 const terminalNoticeButtonClassName =
-  "!mt-[4px] !border-[#465063] !bg-[#172033] !text-[#f2f4f7] hover:!bg-[#1d2a44]";
+  "!h-[1.2rem] !min-h-[1.2rem] !rounded-[4px] !border-[#38465a] !bg-[#111827] !px-[6px] !text-[0.8rem] !leading-none !text-[#d0d5dd] hover:!bg-[#172033]";
 
 interface TerminalRuntime {
   terminal: XTerm;
@@ -85,6 +93,8 @@ interface TerminalStatus {
 }
 
 interface TerminalNotice {
+  actionLabel: string;
+  presentation: "banner" | "overlay";
   message: string;
   title: string;
 }
@@ -93,7 +103,6 @@ interface OpenTerminalOptions {
   cwd?: string;
   existingSessionId?: string;
   launch?: TerminalLaunchSpec;
-  restoredLatestOutputSeq?: number;
   title?: string;
 }
 
@@ -116,6 +125,7 @@ export function TerminalTool() {
   const generationRef = useRef(0);
   const inputQueueRef = useRef<Promise<void>>(Promise.resolve());
   const persistedSessionSnapshotKeyRef = useRef<string | undefined>(undefined);
+  const terminalSessionFinishedRef = useRef(false);
   const lastSizeRef = useRef<{ cols: number; rows: number } | undefined>(
     undefined,
   );
@@ -133,17 +143,6 @@ export function TerminalTool() {
   useEffect(() => {
     machineRef.current = machine;
   }, [machine]);
-
-  useEffect(() => {
-    const persistLatestOutputSeq = () => {
-      tabState.setTerminalLatestOutputSeq(latestSeqRef.current);
-    };
-    globalThis.addEventListener("pagehide", persistLatestOutputSeq);
-    return () => {
-      persistLatestOutputSeq();
-      globalThis.removeEventListener("pagehide", persistLatestOutputSeq);
-    };
-  }, [tabState]);
 
   useEffect(() => {
     if (!sessionInfo) {
@@ -228,7 +227,6 @@ export function TerminalTool() {
       cwd: tab?.terminalLastKnownCwd,
       existingSessionId: tab?.terminalSessionId,
       launch: tab?.terminalLaunch,
-      restoredLatestOutputSeq: tab?.terminalLatestOutputSeq,
       title: tab?.terminalLastKnownTitle ?? tab?.title,
     });
     return () => stopCurrentAttach();
@@ -253,7 +251,8 @@ export function TerminalTool() {
     stopCurrentAttach();
     terminalSessionIdRef.current = undefined;
     attachIdRef.current = undefined;
-    latestSeqRef.current = options.restoredLatestOutputSeq;
+    latestSeqRef.current = undefined;
+    terminalSessionFinishedRef.current = false;
     persistedSessionSnapshotKeyRef.current = undefined;
     setSessionInfo(undefined);
     runtime.terminal.reset();
@@ -353,6 +352,16 @@ export function TerminalTool() {
       if (cancelled || generationRef.current !== generation) return;
       handleTerminalEvent(event);
     }
+    if (
+      !cancelled &&
+      generationRef.current === generation &&
+      !terminalSessionFinishedRef.current
+    ) {
+      setStatus({
+        phase: "closed",
+        message: "Terminal session ended.",
+      });
+    }
   }
 
   function handleTerminalEvent(event: TerminalEvent) {
@@ -360,6 +369,14 @@ export function TerminalTool() {
       case "attached":
         attachIdRef.current = event.attachId;
         setSessionInfo(event.session);
+        if (event.session.exit) {
+          terminalSessionFinishedRef.current = true;
+          setStatus({
+            phase: "closed",
+            message: terminalExitMessage(event.session.exit),
+          });
+          return;
+        }
         setStatus({
           phase: event.primaryAttachId === event.attachId
             ? "attached"
@@ -397,12 +414,13 @@ export function TerminalTool() {
         );
         return;
       case "sessionExited":
+        terminalSessionFinishedRef.current = true;
         setSessionInfo((current) =>
           current ? { ...current, exit: event.exit } : current
         );
-        setStatus({ phase: "closed", message: "Process exited" });
         return;
       case "sessionClosed":
+        terminalSessionFinishedRef.current = true;
         clearTerminalSessionReference();
         setStatus({
           phase: "closed",
@@ -431,7 +449,12 @@ export function TerminalTool() {
         const currentMachine = machineRef.current;
         const terminalSessionId = terminalSessionIdRef.current;
         const attachId = attachIdRef.current;
-        if (!currentMachine || !terminalSessionId || !attachId) return;
+        if (
+          terminalSessionFinishedRef.current ||
+          !currentMachine ||
+          !terminalSessionId ||
+          !attachId
+        ) return;
         await writeTerminalInput(
           currentMachine,
           terminalSessionId,
@@ -450,7 +473,13 @@ export function TerminalTool() {
     const runtime = runtimeRef.current;
     const terminalSessionId = terminalSessionIdRef.current;
     const attachId = attachIdRef.current;
-    if (!currentMachine || !runtime || !terminalSessionId || !attachId) return;
+    if (
+      terminalSessionFinishedRef.current ||
+      !currentMachine ||
+      !runtime ||
+      !terminalSessionId ||
+      !attachId
+    ) return;
     const size = terminalSize(runtime.terminal);
     const previous = lastSizeRef.current;
     lastSizeRef.current = size;
@@ -509,15 +538,18 @@ export function TerminalTool() {
     attachIdRef.current = undefined;
     latestSeqRef.current = undefined;
     tabState.setTerminalSessionId(undefined);
-    tabState.setTerminalLatestOutputSeq(undefined);
   }
 
   function openNewTerminalSession() {
+    const launch = sessionInfo?.launch ?? tab?.terminalLaunch;
+    const cwd = sessionInfo?.lastKnownCwd ?? tab?.terminalLastKnownCwd;
+    const title = sessionInfo?.lastKnownTitle ?? tab?.terminalLastKnownTitle ??
+      tab?.title;
     clearTerminalSessionReference();
     void openTerminal({
-      cwd: tab?.terminalLastKnownCwd,
-      launch: tab?.terminalLaunch,
-      title: tab?.terminalLastKnownTitle ?? tab?.title,
+      cwd,
+      launch,
+      title,
     });
   }
 
@@ -545,16 +577,18 @@ export function TerminalTool() {
     );
   }
 
-  const terminalNotice = terminalNoticeFromStatus(status);
-  const canOpenNewTerminal = Boolean(tab?.terminalLaunch?.command);
+  const terminalNotice = terminalNoticeFromState(status, sessionInfo);
+  const canOpenNewTerminal = Boolean(
+    sessionInfo?.launch.command ?? tab?.terminalLaunch?.command,
+  );
 
   return (
     <section className={terminalToolClassName}>
       <div className={terminalSurfaceClassName}>
         <div ref={hostRef} className={terminalHostClassName} />
-        {terminalNotice
+        {terminalNotice?.presentation === "overlay"
           ? (
-            <div className={terminalNoticeClassName}>
+            <div className={terminalOverlayNoticeClassName}>
               <div>
                 <h2>{terminalNotice.title}</h2>
                 <p>{terminalNotice.message}</p>
@@ -564,7 +598,7 @@ export function TerminalTool() {
                       className={terminalNoticeButtonClassName}
                       onClick={openNewTerminalSession}
                     >
-                      Start new terminal session
+                      {terminalNotice.actionLabel}
                     </Button>
                   )
                   : null}
@@ -573,6 +607,24 @@ export function TerminalTool() {
           )
           : null}
       </div>
+      {terminalNotice?.presentation === "banner"
+        ? (
+          <div className={terminalStatusNoticeClassName}>
+            <strong>{terminalNotice.title}</strong>
+            <span>{terminalNotice.message}</span>
+            {canOpenNewTerminal
+              ? (
+                <Button
+                  className={terminalNoticeButtonClassName}
+                  onClick={openNewTerminalSession}
+                >
+                  {terminalNotice.actionLabel}
+                </Button>
+              )
+              : null}
+          </div>
+        )
+        : null}
       <div className={terminalFooterClassName}>
         <div className={terminalFooterDetailsClassName}>
           <strong>{terminalLaunchName(sessionInfo)}</strong>
@@ -601,28 +653,49 @@ function terminalLaunchName(sessionInfo: TerminalSessionInfo | undefined) {
   return commandName(sessionInfo.launch.command);
 }
 
-function terminalNoticeFromStatus(
+function terminalNoticeFromState(
   status: TerminalStatus,
+  sessionInfo: TerminalSessionInfo | undefined,
 ): TerminalNotice | undefined {
+  if (sessionInfo?.exit) {
+    return {
+      actionLabel: "Restart",
+      presentation: "banner",
+      title: "Exited",
+      message: terminalExitMessage(sessionInfo.exit),
+    };
+  }
   if (status.phase === "missing") {
     return {
+      actionLabel: "Start new terminal session",
+      presentation: "overlay",
       title: "Terminal session closed",
       message: status.message,
     };
   }
   if (status.phase === "closed") {
     return {
+      actionLabel: "Start new terminal session",
+      presentation: "overlay",
       title: "Terminal session closed",
       message: status.message,
     };
   }
   if (status.phase === "error") {
     return {
+      actionLabel: "Start new terminal session",
+      presentation: "overlay",
       title: "Terminal error",
       message: status.message,
     };
   }
   return undefined;
+}
+
+function terminalExitMessage(exit: TerminalExit): string {
+  if (exit.code !== undefined) return `Process exited with code ${exit.code}.`;
+  if (exit.signal) return `Process exited after signal ${exit.signal}.`;
+  return "Process exited.";
 }
 
 function terminalSessionClosedMessage(reason: string): string {

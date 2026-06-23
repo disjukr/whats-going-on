@@ -917,7 +917,6 @@ function ClientDetailPage(
     state,
   }: ClientDetailPageProps,
 ) {
-  const openSessions = sessions.filter((session) => !session.exit);
   return (
     <section className={clientDetailPageClassName}>
       <ClientInformationSection
@@ -927,7 +926,7 @@ function ClientDetailPage(
       />
       <ClientTerminalSessions
         onCloseTerminalSession={onCloseTerminalSession}
-        sessions={openSessions}
+        sessions={sessions}
         state={state}
       />
     </section>
@@ -1080,9 +1079,7 @@ function ClientTerminalSessions(
         : state.phase === "loading"
         ? <ClientDetailState message="Loading terminal sessions" />
         : sessions.length === 0
-        ? (
-          <ClientDetailState message="No open terminal sessions for this client" />
-        )
+        ? <ClientDetailState message="No terminal sessions for this client" />
         : (
           <div className={terminalSessionListClassName}>
             {sessions.map((session) => (
@@ -1099,7 +1096,8 @@ function ClientTerminalSessions(
                     : "Close"}
                 </Button>
                 <small>
-                  Running · {session.lastKnownCwd ?? "cwd unknown"}
+                  {terminalSessionStatus(session)} ·{" "}
+                  {session.lastKnownCwd ?? "cwd unknown"}
                 </small>
               </article>
             ))}
@@ -1115,6 +1113,15 @@ interface ClientDetailStateProps {
 
 function ClientDetailState({ message }: ClientDetailStateProps) {
   return <div className={clientDetailStateClassName}>{message}</div>;
+}
+
+function terminalSessionStatus(session: TerminalSessionInfo): string {
+  if (session.exit?.code !== undefined) {
+    return `Exited with code ${session.exit.code}`;
+  }
+  if (session.exit?.signal) return `Exited after ${session.exit.signal}`;
+  if (session.exit) return "Exited";
+  return "Running";
 }
 
 interface InlineStateProps {

@@ -21,7 +21,6 @@ export interface WorkbenchTab {
   terminalLaunch?: TerminalLaunchSpec;
   terminalLastKnownCwd?: string;
   terminalLastKnownTitle?: string;
-  terminalLatestOutputSeq?: number;
   terminalSessionId?: string;
 }
 
@@ -207,31 +206,6 @@ export const workbenchBunja = bunja(() => {
               tabs: pane.tabs.map((tab) =>
                 tab.id === tabId && tab.tool === "terminal"
                   ? { ...tab, terminalSessionId }
-                  : tab
-              ),
-            }
-            : pane
-        ),
-      }),
-    );
-  }
-
-  function setTerminalLatestOutputSeq(
-    paneId: string,
-    tabId: string,
-    terminalLatestOutputSeq: number | undefined,
-  ) {
-    store.set(
-      stateAtom,
-      (current) => ({
-        ...current,
-        panes: current.panes.map((pane) =>
-          pane.id === paneId
-            ? {
-              ...pane,
-              tabs: pane.tabs.map((tab) =>
-                tab.id === tabId && tab.tool === "terminal"
-                  ? { ...tab, terminalLatestOutputSeq }
                   : tab
               ),
             }
@@ -505,7 +479,6 @@ export const workbenchBunja = bunja(() => {
     moveTabToNewPane,
     setDaemonClientDetailId,
     setDaemonClientsPageOpen,
-    setTerminalLatestOutputSeq,
     setTerminalSessionSnapshot,
     setTerminalSessionId,
   };
@@ -585,17 +558,6 @@ export const workbenchPaneBunja = bunja(() => {
     workbench.setTerminalSessionId(paneId, tabId, terminalSessionId);
   }
 
-  function setTerminalLatestOutputSeq(
-    tabId: string,
-    terminalLatestOutputSeq: number | undefined,
-  ) {
-    workbench.setTerminalLatestOutputSeq(
-      paneId,
-      tabId,
-      terminalLatestOutputSeq,
-    );
-  }
-
   function setTerminalSessionSnapshot(
     tabId: string,
     snapshot: WorkbenchTerminalSessionSnapshot,
@@ -638,7 +600,6 @@ export const workbenchPaneBunja = bunja(() => {
     moveTabToNewPane,
     setDaemonClientDetailId,
     setDaemonClientsPageOpen,
-    setTerminalLatestOutputSeq,
     setTerminalSessionSnapshot,
     setTerminalSessionId,
   };
@@ -668,12 +629,6 @@ export const workbenchTabBunja = bunja(() => {
     pane.setTerminalSessionId(tabId, terminalSessionId);
   }
 
-  function setTerminalLatestOutputSeq(
-    terminalLatestOutputSeq: number | undefined,
-  ) {
-    pane.setTerminalLatestOutputSeq(tabId, terminalLatestOutputSeq);
-  }
-
   function setTerminalSessionSnapshot(
     snapshot: WorkbenchTerminalSessionSnapshot,
   ) {
@@ -697,7 +652,6 @@ export const workbenchTabBunja = bunja(() => {
     selectTab,
     setDaemonClientDetailId,
     setDaemonClientsPageOpen,
-    setTerminalLatestOutputSeq,
     setTerminalSessionSnapshot,
     setTerminalSessionId,
   };
