@@ -33,19 +33,6 @@ const PROC_CLOSE_TERMINAL_SESSION = 18;
 const PROC_SUBSCRIBE_CLIENTS = 19;
 const CONNECT_TIMEOUT_MS = 10_000;
 
-export interface ClientCredentialRenewal {
-  machineId: string;
-  clientId: string;
-  clientSecret: string;
-  clientCredentialExpiresAtUnix: number;
-}
-
-export interface RpcCallOptions {
-  rpcSession?: () => Promise<WebTransport>;
-  closeRpcSession?: () => void;
-  onClientCredentialRenewal?: (renewal: ClientCredentialRenewal) => void;
-}
-
 export interface CompletePairingResponse {
   clientId: string;
   clientSecret: string;
@@ -313,36 +300,22 @@ export async function startPairing(
 }
 
 export async function renewClientCredential(
-  machine: Machine,
-  options: RpcCallOptions = {},
+  transport: WebTransport,
 ): Promise<RenewClientCredentialResponse> {
-  if (!machine.clientId || !machine.clientSecret) {
-    throw new Error("missing paired client credentials");
-  }
-  const session = await authenticatedSession(options);
-  try {
-    const renewal = await renewAuthenticatedSessionCredential(
-      session,
-    );
-    emitClientCredentialRenewal(machine, options, renewal);
-    return renewal;
-  } catch (err) {
-    closeSession(machine, options);
-    throw err;
-  }
+  return await renewAuthenticatedSessionCredential(transport);
 }
 
-export async function getDaemonInfo(
-  machine: Machine,
+export async function getDaemonInfoFromTransport(
+  transport: WebTransport,
 ): Promise<DaemonInfo> {
-  const response = await callUnaryPayload(
-    machine,
+  const response = await sendUnaryPayload(
+    transport,
     PROC_GET_DAEMON_INFO,
-    undefined,
-    {
-      includeAuth: false,
-    },
   );
+  return decodeDaemonInfoResponse(response);
+}
+
+function decodeDaemonInfoResponse(response: Uint8Array): DaemonInfo {
   const map = decodeMap(response);
   return {
     supportedProcIds: array(map.get(1)).map(integer),
@@ -355,51 +328,44 @@ export async function getDaemonInfo(
 }
 
 export async function* subscribeClients(
-  machine: Machine,
-  options: RpcCallOptions = {},
+  transport: WebTransport,
 ): AsyncGenerator<ClientsTableEvent> {
   yield* callServerStreamEvents(
-    machine,
+    transport,
     PROC_SUBSCRIBE_CLIENTS,
     undefined,
     decodeClientsTableEvent,
-    options,
   );
 }
 
 export async function* subscribeRoots(
-  machine: Machine,
-  options: RpcCallOptions = {},
+  transport: WebTransport,
 ): AsyncGenerator<RootsTableEvent> {
   yield* callServerStreamEvents(
-    machine,
+    transport,
     PROC_SUBSCRIBE_ROOTS,
     undefined,
     decodeRootsTableEvent,
-    options,
   );
 }
 
 export async function* subscribeDirectory(
-  machine: Machine,
+  transport: WebTransport,
   path: string,
-  options: RpcCallOptions = {},
 ): AsyncGenerator<DirectoryTableEvent> {
   const payload = encodeCbor(new Map<number, CborValue>([[1, path]]));
   yield* callServerStreamEvents(
-    machine,
+    transport,
     PROC_SUBSCRIBE_DIRECTORY,
     payload,
     decodeDirectoryTableEvent,
-    options,
   );
 }
 
 export async function readFile(
-  machine: Machine,
+  transport: WebTransport,
   path: string,
   options: ReadFileOptions = {},
-  rpcOptions: RpcCallOptions = {},
 ): Promise<Uint8Array> {
   const request = new Map<number, CborValue>([[1, path]]);
   if (options.offset !== undefined) request.set(2, options.offset);
@@ -408,11 +374,10 @@ export async function readFile(
   const chunks: ReadFileChunk[] = [];
   for await (
     const chunk of callServerStreamEvents(
-      machine,
+      transport,
       PROC_READ_FILE,
       encodeCbor(request),
       decodeReadFileChunk,
-      rpcOptions,
     )
   ) {
     chunks.push(chunk);
@@ -421,15 +386,14 @@ export async function readFile(
 }
 
 export async function writeFile(
-  machine: Machine,
+  transport: WebTransport,
   path: string,
   mode: WriteFileMode,
   fileBytes: Uint8Array,
   options: Omit<WriteFileStart, "path" | "mode"> & { offset?: number } = {},
-  rpcOptions: RpcCallOptions = {},
 ): Promise<WriteFileResult> {
   return await writeFileChunks(
-    machine,
+    transport,
     {
       path,
       mode,
@@ -437,30 +401,26 @@ export async function writeFile(
       modifiedAtMs: options.modifiedAtMs,
     },
     [{ offset: options.offset, bytes: fileBytes }],
-    rpcOptions,
   );
 }
 
 export async function writeFileChunks(
-  machine: Machine,
+  transport: WebTransport,
   start: WriteFileStart,
   chunks: WriteFileChunk[],
-  options: RpcCallOptions = {},
 ): Promise<WriteFileResult> {
   const response = await callClientStreamPayload(
-    machine,
+    transport,
     PROC_WRITE_FILE,
     encodeWriteFileStart(start),
     chunks.map(encodeWriteFileChunk),
-    options,
   );
   return decodeWriteFileResult(response);
 }
 
 export async function createNodes(
-  machine: Machine,
+  transport: WebTransport,
   nodes: CreateNodeOp[],
-  options: RpcCallOptions = {},
 ): Promise<BulkMutationResponse> {
   const payload = encodeCbor(
     new Map<number, CborValue>([
@@ -468,18 +428,16 @@ export async function createNodes(
     ]),
   );
   const response = await callUnaryPayload(
-    machine,
+    transport,
     PROC_CREATE_NODES,
     payload,
-    options,
   );
   return decodeBulkMutationResponse(response);
 }
 
 export async function renamePaths(
-  machine: Machine,
+  transport: WebTransport,
   ops: RenamePathOp[],
-  options: RpcCallOptions = {},
 ): Promise<BulkMutationResponse> {
   const payload = encodeCbor(
     new Map<number, CborValue>([
@@ -495,19 +453,17 @@ export async function renamePaths(
     ]),
   );
   const response = await callUnaryPayload(
-    machine,
+    transport,
     PROC_RENAME_PATHS,
     payload,
-    options,
   );
   return decodeBulkMutationResponse(response);
 }
 
 export async function deletePaths(
-  machine: Machine,
+  transport: WebTransport,
   paths: string[],
   mode: DeleteMode,
-  options: RpcCallOptions = {},
 ): Promise<BulkMutationResponse> {
   const payload = encodeCbor(
     new Map<number, CborValue>([
@@ -516,66 +472,58 @@ export async function deletePaths(
     ]),
   );
   const response = await callUnaryPayload(
-    machine,
+    transport,
     PROC_DELETE_PATHS,
     payload,
-    options,
   );
   return decodeBulkMutationResponse(response);
 }
 
 export async function createTerminalSession(
-  machine: Machine,
+  transport: WebTransport,
   request: CreateTerminalSessionRequest,
-  options: RpcCallOptions = {},
 ): Promise<TerminalSessionInfo> {
   const response = await callUnaryPayload(
-    machine,
+    transport,
     PROC_CREATE_TERMINAL_SESSION,
     encodeCreateTerminalSessionRequest(request),
-    options,
   );
   return decodeTerminalSessionInfoValue(decodeCbor(response));
 }
 
 export async function* subscribeTerminalSessions(
-  machine: Machine,
-  options: RpcCallOptions = {},
+  transport: WebTransport,
 ): AsyncGenerator<TerminalSessionsTableEvent> {
   yield* callServerStreamEvents(
-    machine,
+    transport,
     PROC_SUBSCRIBE_TERMINAL_SESSIONS,
     undefined,
     decodeTerminalSessionsTableEvent,
-    options,
   );
 }
 
 export async function* subscribeAvailableShells(
-  machine: Machine,
-  options: RpcCallOptions = {},
+  transport: WebTransport,
 ): AsyncGenerator<AvailableShellsTableEvent> {
   yield* callServerStreamEvents(
-    machine,
+    transport,
     PROC_SUBSCRIBE_AVAILABLE_SHELLS,
     undefined,
     decodeAvailableShellsTableEvent,
-    options,
   );
 }
 
 export async function* attachTerminalSession(
-  machine: Machine,
+  transport: WebTransport,
   request: {
     terminalSessionId: string;
     afterSeq?: number;
     viewportCols: number;
     viewportRows: number;
   },
-  options: RpcCallOptions = {},
 ): AsyncGenerator<TerminalEvent> {
   yield* callServerStreamEvents(
-    machine,
+    transport,
     PROC_ATTACH_TERMINAL_SESSION,
     encodeCbor(
       new Map<number, CborValue>([
@@ -588,22 +536,20 @@ export async function* attachTerminalSession(
       ]),
     ),
     decodeTerminalEvent,
-    options,
   );
 }
 
 export async function takeTerminalControl(
-  machine: Machine,
+  transport: WebTransport,
   request: {
     terminalSessionId: string;
     attachId: string;
     viewportCols: number;
     viewportRows: number;
   },
-  options: RpcCallOptions = {},
 ): Promise<TakeTerminalControlResponse> {
   const response = await callUnaryPayload(
-    machine,
+    transport,
     PROC_TAKE_TERMINAL_CONTROL,
     encodeCbor(
       new Map<number, CborValue>([
@@ -613,21 +559,19 @@ export async function takeTerminalControl(
         [4, request.viewportRows],
       ]),
     ),
-    options,
   );
   const map = decodeMap(response);
   return { primaryAttachId: text(map.get(1)) };
 }
 
 export async function writeTerminalInput(
-  machine: Machine,
+  transport: WebTransport,
   terminalSessionId: string,
   attachId: string,
   bytes: Uint8Array,
-  options: RpcCallOptions = {},
 ): Promise<void> {
   await callClientStream(
-    machine,
+    transport,
     PROC_WRITE_TERMINAL_INPUT,
     encodeCbor([
       1,
@@ -637,37 +581,26 @@ export async function writeTerminalInput(
       ]),
     ]),
     [encodeCbor([2, new Map<number, CborValue>([[1, bytes]])])],
-    options,
   );
 }
 
 export async function closeTerminalSession(
-  machine: Machine,
+  transport: WebTransport,
   terminalSessionId: string,
-  options: RpcCallOptions = {},
 ): Promise<void> {
   await callUnary(
-    machine,
+    transport,
     PROC_CLOSE_TERMINAL_SESSION,
     encodeCbor(new Map<number, CborValue>([[1, terminalSessionId]])),
-    options,
   );
 }
 
-export function closeMachineWebTransport(
-  machine: Machine,
-  options: RpcCallOptions = {},
-): void {
-  closeSession(machine, options);
-}
-
 async function callUnaryPayload(
-  machine: Machine,
+  transport: WebTransport,
   procId: number,
-  payload?: Uint8Array,
-  options: RpcCallOptions & { includeAuth?: boolean } = {},
+  payload: Uint8Array | undefined,
 ): Promise<Uint8Array> {
-  const response = await callUnary(machine, procId, payload, options);
+  const response = await callUnary(transport, procId, payload);
   if (!response) throw new Error("missing response payload");
   return response;
 }
@@ -683,129 +616,55 @@ export async function sendUnaryPayload(
 }
 
 async function callUnary(
-  machine: Machine,
+  transport: WebTransport,
   procId: number,
-  payload?: Uint8Array,
-  options: RpcCallOptions & { includeAuth?: boolean } = {},
+  payload: Uint8Array | undefined,
 ): Promise<Uint8Array | undefined> {
-  if (
-    options.includeAuth !== false && machine.clientId && machine.clientSecret
-  ) {
-    const transport = await authenticatedSession(options);
-    try {
-      return await sendUnary(transport, procId, payload);
-    } catch (err) {
-      closeSession(machine, options);
-      throw err;
-    }
-  }
-
-  const transport = await openWebTransport(machine, "/rpc");
-  try {
-    return await sendUnary(transport, procId, payload);
-  } finally {
-    closeWebTransport(transport);
-  }
+  return await sendUnary(transport, procId, payload);
 }
 
 async function callClientStreamPayload(
-  machine: Machine,
+  transport: WebTransport,
   procId: number,
   startPayload: Uint8Array,
   chunkPayloads: Uint8Array[],
-  options: RpcCallOptions = {},
 ): Promise<Uint8Array> {
   const response = await callClientStream(
-    machine,
+    transport,
     procId,
     startPayload,
     chunkPayloads,
-    options,
   );
   if (!response) throw new Error("missing response payload");
   return response;
 }
 
 async function callClientStream(
-  machine: Machine,
+  transport: WebTransport,
   procId: number,
   startPayload: Uint8Array,
   chunkPayloads: Uint8Array[],
-  options: RpcCallOptions = {},
 ): Promise<Uint8Array | undefined> {
-  if (machine.clientId && machine.clientSecret) {
-    const transport = await authenticatedSession(options);
-    try {
-      return await sendClientStream(
-        transport,
-        procId,
-        startPayload,
-        chunkPayloads,
-      );
-    } catch (err) {
-      closeSession(machine, options);
-      throw err;
-    }
-  }
-
-  const transport = await openWebTransport(machine, "/rpc");
-  try {
-    return await sendClientStream(
-      transport,
-      procId,
-      startPayload,
-      chunkPayloads,
-    );
-  } finally {
-    closeWebTransport(transport);
-  }
+  return await sendClientStream(
+    transport,
+    procId,
+    startPayload,
+    chunkPayloads,
+  );
 }
 
 async function* callServerStreamEvents<T>(
-  machine: Machine,
+  transport: WebTransport,
   procId: number,
   payload: Uint8Array | undefined,
   decodePayload: (bytes: Uint8Array) => T,
-  options: RpcCallOptions = {},
 ): AsyncGenerator<T> {
-  if (machine.clientId && machine.clientSecret) {
-    const transport = await authenticatedSession(options);
-    try {
-      yield* streamServerEvents(
-        transport,
-        procId,
-        payload,
-        decodePayload,
-      );
-    } catch (err) {
-      if (!shouldKeepAuthenticatedSessionAfterStreamError(procId, err)) {
-        closeSession(machine, options);
-      }
-      throw err;
-    }
-    return;
-  }
-
-  const transport = await openWebTransport(machine, "/rpc");
-  try {
-    yield* streamServerEvents(
-      transport,
-      procId,
-      payload,
-      decodePayload,
-    );
-  } finally {
-    closeWebTransport(transport);
-  }
-}
-
-function shouldKeepAuthenticatedSessionAfterStreamError(
-  procId: number,
-  err: unknown,
-): boolean {
-  return procId === PROC_ATTACH_TERMINAL_SESSION &&
-    err instanceof RpcError &&
-    err.code === "NotFound";
+  yield* streamServerEvents(
+    transport,
+    procId,
+    payload,
+    decodePayload,
+  );
 }
 
 export async function openWebTransport(
@@ -843,50 +702,6 @@ function withTimeout<T>(
   return Promise.race([promise, timeoutPromise]).finally(() => {
     if (timeout !== undefined) clearTimeout(timeout);
   });
-}
-
-function authenticatedSession(
-  options: RpcCallOptions = {},
-): Promise<WebTransport> {
-  if (!options.rpcSession) {
-    throw new Error("missing authenticated RPC session provider");
-  }
-  return options.rpcSession();
-}
-
-export async function renewWebTransportCredential(
-  machine: Machine,
-  transport: WebTransport,
-  options: RpcCallOptions,
-): Promise<void> {
-  if (!machine.clientId || !machine.clientSecret) return;
-  try {
-    const renewal = await renewAuthenticatedSessionCredential(transport);
-    emitClientCredentialRenewal(machine, options, renewal);
-  } catch {
-    // A valid session can still be useful even if persisting a refreshed
-    // credential expiry fails. The next renewal tick or authenticated session
-    // will retry.
-  }
-}
-
-function emitClientCredentialRenewal(
-  machine: Machine,
-  options: RpcCallOptions,
-  renewal: RenewClientCredentialResponse,
-): void {
-  if (!machine.clientId || !machine.clientSecret) return;
-  options.onClientCredentialRenewal?.({
-    machineId: machine.id,
-    clientId: machine.clientId,
-    clientSecret: machine.clientSecret,
-    clientCredentialExpiresAtUnix: renewal.clientCredentialExpiresAtUnix,
-  });
-}
-
-function closeSession(machine: Machine, options: RpcCallOptions = {}): void {
-  void machine;
-  options.closeRpcSession?.();
 }
 
 export async function authenticateWebTransport(

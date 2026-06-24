@@ -200,11 +200,10 @@ export function WorkbenchPaneView(
     }
 
     for (const terminalSessionId of closingTerminalSessionIds) {
-      void closeTerminalSession(
-        machine,
-        terminalSessionId,
-        machineStore.rpcCallOptions(rpcSession.rpcCallOptions()),
-      ).catch(() => {
+      void (async () => {
+        const transport = await rpcSession.webTransport();
+        await closeTerminalSession(transport, terminalSessionId);
+      })().catch(() => {
         // Closing a tab should not be blocked by a stale connection or session.
       });
     }

@@ -98,7 +98,7 @@ export default function MarkdownFileViewer() {
   const fsEntry = viewer.fsEntry;
   const viewerState = useAtomValue(viewer.stateAtom);
   const machine = useAtomValue(viewer.machineAtom);
-  const rpcCallOptions = viewer.rpcCallOptions;
+  const webTransport = viewer.webTransport;
   const requiresConfirmation = fsEntry.size === undefined ||
     fsEntry.size > inlineOpenLimitBytes;
   const [confirmedFsEntryPath, setConfirmedFsEntryPath] = useState<
@@ -123,7 +123,7 @@ export default function MarkdownFileViewer() {
       try {
         const bytes = hasCompleteInitialBytes(fsEntry, viewerState.initialBytes)
           ? viewerState.initialBytes
-          : await readFile(machine, fsEntry.path, {}, rpcCallOptions());
+          : await readFile(await webTransport(), fsEntry.path);
         if (cancelled) return;
         setState({
           phase: "ready",
@@ -141,7 +141,7 @@ export default function MarkdownFileViewer() {
     return () => {
       cancelled = true;
     };
-  }, [confirmed, fsEntry, fsEntry.path, machine, rpcCallOptions, viewerState]);
+  }, [confirmed, fsEntry, fsEntry.path, machine, webTransport, viewerState]);
 
   if (!machine) {
     return (

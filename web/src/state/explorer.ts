@@ -11,7 +11,7 @@ import {
   subscribeDirectory,
   subscribeRoots,
 } from "../protocol/rpc.ts";
-import { MachineIdScope } from "./machine-id.tsx";
+import { MachineIdScope } from "./machine.tsx";
 import { machineBunja, machineStoreBunja } from "./machine-store.ts";
 import { Machine } from "./machines.ts";
 import { rpcSessionBunja } from "./rpc-session.ts";
@@ -223,13 +223,10 @@ export const explorerRootsBunja = bunja(() => {
       }
 
       let cancelled = false;
-      const iterator = subscribeRoots(
-        machine,
-        machines.rpcCallOptions(rpcSession.rpcCallOptions()),
-      );
+      let iterator: AsyncGenerator<RootsTableEvent> | undefined;
       stopCurrent = () => {
         cancelled = true;
-        void iterator.return(undefined);
+        void iterator?.return(undefined);
       };
       store.set(rootsStateAtom, {
         phase: "connecting",
@@ -237,6 +234,9 @@ export const explorerRootsBunja = bunja(() => {
       });
       void (async () => {
         try {
+          const transport = await rpcSession.webTransport();
+          if (cancelled) return;
+          iterator = subscribeRoots(transport);
           for await (const event of iterator) {
             if (cancelled) break;
             applyRootsEvent(event, store, rootsAtom, rootsStateAtom);
@@ -324,14 +324,10 @@ export const explorerDirectoryBunja = bunja(() => {
       }
 
       let cancelled = false;
-      const iterator = subscribeDirectory(
-        machine,
-        currentPath,
-        machines.rpcCallOptions(rpcSession.rpcCallOptions()),
-      );
+      let iterator: AsyncGenerator<DirectoryTableEvent> | undefined;
       stopCurrent = () => {
         cancelled = true;
-        void iterator.return(undefined);
+        void iterator?.return(undefined);
       };
       store.set(directoryStateAtom, {
         phase: "connecting",
@@ -339,6 +335,9 @@ export const explorerDirectoryBunja = bunja(() => {
       });
       void (async () => {
         try {
+          const transport = await rpcSession.webTransport();
+          if (cancelled) return;
+          iterator = subscribeDirectory(transport, currentPath);
           for await (const event of iterator) {
             if (cancelled) break;
             applyDirectoryEvent(

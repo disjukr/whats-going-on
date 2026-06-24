@@ -24,7 +24,7 @@ export const terminalShellsBunja = bunja(() => {
     terminalShellsSubscriptionKey(
       get(machines.selectedAtom),
       get(machines.selectedIsPairedAtom),
-      get(rpcSession.connectionEpochAtom),
+      get(rpcSession.daemonInstanceIdAtom),
     )
   );
 
@@ -40,16 +40,16 @@ export const terminalShellsBunja = bunja(() => {
       if (!machine || !store.get(machines.selectedIsPairedAtom)) return;
 
       let cancelled = false;
-      const iterator = subscribeAvailableShells(
-        machine,
-        machines.rpcCallOptions(rpcSession.rpcCallOptions()),
-      );
+      let iterator: AsyncGenerator<AvailableShellsTableEvent> | undefined;
       stopCurrent = () => {
         cancelled = true;
-        void iterator.return(undefined);
+        void iterator?.return(undefined);
       };
       void (async () => {
         try {
+          const transport = await rpcSession.webTransport();
+          if (cancelled) return;
+          iterator = subscribeAvailableShells(transport);
           for await (const event of iterator) {
             if (cancelled) break;
             if (event.type === "snapshot") {
@@ -84,15 +84,15 @@ export const terminalShellsBunja = bunja(() => {
 function terminalShellsSubscriptionKey(
   machine: Machine | undefined,
   selectedIsPaired: boolean,
-  connectionEpoch: number,
+  daemonInstanceId: string | undefined,
 ): string {
-  if (!machine || !selectedIsPaired) return "idle";
+  if (!machine || !selectedIsPaired || !daemonInstanceId) return "idle";
   return [
     machine.id,
     machine.baseUrl,
     machine.clientId ?? "",
     machine.clientSecret ?? "",
-    connectionEpoch,
+    daemonInstanceId,
   ].join("\n");
 }
 

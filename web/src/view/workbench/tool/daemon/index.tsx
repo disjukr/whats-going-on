@@ -61,7 +61,6 @@ const statusPillClassName = [
   "bg-[#eef3fb] px-[9px] py-[4px] text-[12px] font-700 text-[#344054]",
   "[&_svg]:flex-[0_0_auto]",
   "[&.reachable]:bg-[#ecfdf3] [&.reachable]:text-[#027a48]",
-  "[&.checking]:bg-[#fff7e6] [&.checking]:text-[#945800]",
   "[&.offline]:bg-[#fff1f3] [&.offline]:text-[#b42318]",
 ].join(" ");
 const daemonHeaderClassName = [
@@ -252,7 +251,7 @@ export function DaemonTool() {
     rpcSession.daemonUptimeSecondsAtom,
   );
   const connection = useAtomValue(rpcSession.connectionAtom);
-  const connectionEpoch = useAtomValue(rpcSession.connectionEpochAtom);
+  const daemonInstanceId = useAtomValue(rpcSession.daemonInstanceIdAtom);
   const machine = useAtomValue(machines.selectedAtom);
   const isPaired = useAtomValue(machines.selectedIsPairedAtom);
   const tab = useAtomValue(tabState.tabAtom);
@@ -306,14 +305,14 @@ export function DaemonTool() {
     }
 
     let cancelled = false;
-    const iterator = subscribeClients(
-      machine,
-      machines.rpcCallOptions(rpcSession.rpcCallOptions()),
-    );
+    let iterator: AsyncGenerator<ClientsTableEvent> | undefined;
     setClientsState((current) => ({ ...current, phase: "loading" }));
 
     void (async () => {
       try {
+        const transport = await rpcSession.webTransport();
+        if (cancelled) return;
+        iterator = subscribeClients(transport);
         for await (const event of iterator) {
           if (cancelled) return;
           const clients = applyClientsEvent(clientsRef.current, event);
@@ -341,7 +340,7 @@ export function DaemonTool() {
 
     return () => {
       cancelled = true;
-      void iterator.return(undefined);
+      void iterator?.return(undefined);
     };
   }, [
     daemonInfo.phase,
@@ -350,7 +349,7 @@ export function DaemonTool() {
     machine?.clientId,
     machine?.clientSecret,
     machine?.id,
-    connectionEpoch,
+    daemonInstanceId,
   ]);
 
   useEffect(() => {
@@ -364,10 +363,7 @@ export function DaemonTool() {
     }
 
     let cancelled = false;
-    const iterator = subscribeTerminalSessions(
-      machine,
-      machines.rpcCallOptions(rpcSession.rpcCallOptions()),
-    );
+    let iterator: AsyncGenerator<TerminalSessionsTableEvent> | undefined;
     setTerminalSessionsState((current) => ({
       ...current,
       phase: "loading",
@@ -375,6 +371,9 @@ export function DaemonTool() {
 
     void (async () => {
       try {
+        const transport = await rpcSession.webTransport();
+        if (cancelled) return;
+        iterator = subscribeTerminalSessions(transport);
         for await (const event of iterator) {
           if (cancelled) return;
           setTerminalSessionsState((current) => ({
@@ -394,7 +393,7 @@ export function DaemonTool() {
 
     return () => {
       cancelled = true;
-      void iterator.return(undefined);
+      void iterator?.return(undefined);
     };
   }, [
     daemonInfo.phase,
@@ -403,7 +402,7 @@ export function DaemonTool() {
     machine?.clientId,
     machine?.clientSecret,
     machine?.id,
-    connectionEpoch,
+    daemonInstanceId,
   ]);
 
   function openRootPage() {
@@ -423,18 +422,22 @@ export function DaemonTool() {
 
   async function renewSelectedClientCredential() {
     if (!machine) return;
-    await renewClientCredential(
-      machine,
-      machines.rpcCallOptions(rpcSession.rpcCallOptions()),
+    const renewal = await renewClientCredential(
+      await rpcSession.webTransport(),
     );
+    if (machine.clientId === clientDetailId) {
+      machines.setMachineCredentialExpiry(
+        machine.id,
+        renewal.clientCredentialExpiresAtUnix,
+      );
+    }
   }
 
   async function closeSelectedTerminalSession(terminalSessionId: string) {
     if (!machine) return;
     await closeTerminalSession(
-      machine,
+      await rpcSession.webTransport(),
       terminalSessionId,
-      machines.rpcCallOptions(rpcSession.rpcCallOptions()),
     );
   }
 
@@ -463,8 +466,6 @@ export function DaemonTool() {
             <span className={`${statusPillClassName} ${connection.phase}`}>
               {connection.phase === "reachable"
                 ? <CheckCircle2 size={13} />
-                : connection.phase === "checking"
-                ? <Loader2 size={13} />
                 : connection.phase === "offline"
                 ? <WifiOff size={13} />
                 : <Info size={13} />}
@@ -510,14 +511,11 @@ export function DaemonTool() {
 
 function formatDaemonConnectionLabel(connection: ConnectionState): string {
   if (connection.phase === "reachable") {
-    if (connection.latencyMs === undefined) return "Connected";
-    return `Connected - latency ${
-      Math.max(1, Math.round(connection.latencyMs))
-    } ms`;
+    if (connection.rttMs === undefined) return "Connected";
+    return `Connected - latency ${connection.rttMs} ms`;
   }
-  if (connection.phase === "checking") return "Checking connection";
   if (connection.phase === "idle") return "No machine selected";
-  return connection.message;
+  return "Unconnected";
 }
 
 interface DaemonBreadcrumbProps {

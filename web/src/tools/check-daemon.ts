@@ -1,9 +1,3 @@
-import {
-  DatagramMessageKind,
-  decodeDatagramMessage,
-  encodeDatagramMessage,
-} from "../protocol/wire.ts";
-
 interface Args {
   url?: string;
   config: string;
@@ -22,8 +16,8 @@ const baseUrl = args.url ?? configTls.defaultUrl;
 const rpcUrl = rpcEndpoint(baseUrl);
 
 console.log(`connecting ${rpcUrl} with Deno WebTransport`);
-const latencyMs = await checkWebTransport(rpcUrl, args.timeoutMs);
-console.log(`connected; datagram ping ${formatLatency(latencyMs)}`);
+await checkWebTransport(rpcUrl, args.timeoutMs);
+console.log("connected");
 
 function parseArgs(argv: string[]): Args {
   const args: Args = {
@@ -108,7 +102,7 @@ function rpcEndpoint(raw: string): string {
 async function checkWebTransport(
   url: string,
   timeoutMs: number,
-): Promise<number> {
+): Promise<void> {
   if (typeof WebTransport === "undefined") {
     throw new Error(
       "WebTransport is unavailable. Run with Deno --unstable-net.",
@@ -119,11 +113,6 @@ async function checkWebTransport(
 
   try {
     await withTimeout(transport.ready, "WebTransport ready", timeoutMs);
-    return await withTimeout(
-      pingDatagram(transport),
-      "datagram ping",
-      timeoutMs,
-    );
   } finally {
     try {
       transport.close({ closeCode: 0, reason: "done" });
@@ -131,51 +120,6 @@ async function checkWebTransport(
       // Deno throws when closing a WebTransport object that never reached ready.
     }
   }
-}
-
-async function pingDatagram(transport: WebTransport): Promise<number> {
-  const pingId = 1;
-  const writer = transport.datagrams.writable.getWriter();
-  const reader = transport.datagrams.readable.getReader();
-  const startedAt = performance.now();
-  try {
-    await writer.write(encodeDatagramMessage({
-      kind: DatagramMessageKind.Ping,
-      pingId,
-    }));
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) throw new Error("datagram stream closed before pong");
-      const message = decodeDatagramMessage(value);
-      if (
-        message.kind === DatagramMessageKind.Pong &&
-        message.pingId === pingId
-      ) {
-        return performance.now() - startedAt;
-      }
-      if (message.kind === DatagramMessageKind.Ping) {
-        await writer.write(encodeDatagramMessage({
-          kind: DatagramMessageKind.Pong,
-          pingId: message.pingId,
-        }));
-      }
-    }
-  } finally {
-    try {
-      reader.releaseLock();
-    } catch {
-      // The reader may already be detached by transport shutdown.
-    }
-    try {
-      writer.releaseLock();
-    } catch {
-      // The writer may be in an errored state after transport shutdown.
-    }
-  }
-}
-
-function formatLatency(latencyMs: number): string {
-  return `${Math.max(1, Math.round(latencyMs))}ms`;
 }
 
 async function withTimeout<T>(

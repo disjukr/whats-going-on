@@ -1,16 +1,15 @@
 import React, { useEffect } from "react";
 import { useAtomValue } from "jotai";
 import { useBunja } from "bunja/react";
-import { MachineIdContext } from "../../state/machine-id.tsx";
+import {
+  MachineBaseUrlContext,
+  MachineIdContext,
+} from "../../state/machine.tsx";
 import { machineMenuBunja } from "../../state/machine-menu.ts";
 import { machineModalBunja } from "../../state/machine-modal.ts";
 import { machineStoreBunja } from "../../state/machine-store.ts";
 import type { Machine } from "../../state/machines.ts";
-import {
-  rpcSessionBunja,
-  RpcSessionKeyContext,
-  rpcSessionKeyForMachine,
-} from "../../state/rpc-session.ts";
+import { rpcSessionBunja } from "../../state/rpc-session.ts";
 import type { MachineMenuState } from "../../state/types.ts";
 import { MachineContextMenu } from "./machine-context-menu.tsx";
 import { MachineRail } from "./machine-rail.tsx";
@@ -100,9 +99,7 @@ export function MachineRailRegion() {
       {machineMenu && menuMachine
         ? (
           <MachineIdContext value={menuMachine.id}>
-            <RpcSessionKeyContext
-              value={rpcSessionKeyForMachine(menuMachine)}
-            >
+            <MachineBaseUrlContext value={menuMachine.baseUrl}>
               <MachineContextMenuHost
                 machine={menuMachine}
                 menu={machineMenu}
@@ -110,7 +107,7 @@ export function MachineRailRegion() {
                 onDelete={openDeleteMachineModal}
                 onPair={openPairMachineModal}
               />
-            </RpcSessionKeyContext>
+            </MachineBaseUrlContext>
           </MachineIdContext>
         )
         : null}
@@ -141,10 +138,9 @@ function MachineContextMenuHost(
 
   function unpairMachine() {
     machineMenuState.closeMachineMenu();
-    rpcSession.closeRpcSession();
     machineStore.clearMachineCredentials(machine.id);
     machineStore.selectMachine(machine.id);
-    void rpcSession.reconnect();
+    rpcSession.resetController();
   }
 
   return (

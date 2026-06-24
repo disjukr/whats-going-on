@@ -3,7 +3,6 @@ import { useAtomValue, useSetAtom } from "jotai";
 import { useBunja } from "bunja/react";
 import { machineModalBunja } from "../../state/machine-modal.ts";
 import { machineStoreBunja } from "../../state/machine-store.ts";
-import { rpcSessionBunja } from "../../state/rpc-session.ts";
 import { AddMachineForm } from "./add-machine-form.tsx";
 import { MachineModal } from "./machine-modal.tsx";
 import { MachinePanel } from "./machine-panel.tsx";
@@ -84,7 +83,6 @@ export function MachineAddFormContainer(
 export function MachineModalHost() {
   const machineStore = useBunja(machineStoreBunja);
   const machineModal = useBunja(machineModalBunja);
-  const rpcSession = useBunja(rpcSessionBunja);
   const machines = useAtomValue(machineStore.machinesAtom);
   const selected = useAtomValue(machineStore.selectedAtom);
   const machineName = useAtomValue(machineModal.machineNameAtom);
@@ -104,7 +102,6 @@ export function MachineModalHost() {
     machineModal.isRequestingPairingCodeAtom,
   );
   const isPairing = useAtomValue(machineModal.isPairingAtom);
-  const connection = useAtomValue(rpcSession.connectionAtom);
   const modalTitle = useAtomValue(machineModal.modalTitleAtom);
   const setConfigNameDraft = useSetAtom(machineModal.configNameDraftAtom);
   const setConfigUrlDraft = useSetAtom(machineModal.configUrlDraftAtom);
@@ -204,7 +201,6 @@ export function MachineModalHost() {
       configNameDraft={configNameDraft}
       configNameInputRef={configNameInputRef}
       configUrlDraft={configUrlDraft}
-      connection={connection}
       isRequestingPairingCode={isRequestingPairingCode}
       isPairing={isPairing}
       machineCount={machines.length}

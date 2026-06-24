@@ -10,14 +10,11 @@ const connectionPillClassName = [
   "hover:border-[#566074] hover:bg-[#343946] hover:text-white",
   "focus-visible:border-[#566074] focus-visible:bg-[#343946] focus-visible:text-white",
   "active:translate-y-[1px]",
-  "[&.checking]:border-[#566074] [&.checking]:bg-[#343946] [&.checking]:text-white",
   "[&.connected_.connection-dot]:bg-[#22c55e]",
   "[&:hover_.connection-dot]:opacity-0",
   "[&:focus-visible_.connection-dot]:opacity-0",
-  "[&.checking_.connection-dot]:opacity-0",
   "[&:hover_.connection-refresh]:opacity-100",
   "[&:focus-visible_.connection-refresh]:opacity-100",
-  "[&.checking_.connection-refresh]:opacity-100",
 ].join(" ");
 const statusIconClassName =
   "relative inline-flex items-center justify-center w-[1em] h-[1em]";
@@ -41,17 +38,11 @@ export function ConnectionPill(
 ) {
   if (!machine) return null;
 
-  const checking = connection.phase === "checking";
   const connected = connection.phase === "reachable";
-  const label = checking
-    ? "Connecting"
-    : connected
-    ? "Connected"
-    : "Unconnected";
+  const label = connected ? "Connected" : "Unconnected";
   const buttonClassName = className(
     connectionPillClassName,
     connected && "connected",
-    checking && "checking",
   );
 
   return (
@@ -59,18 +50,13 @@ export function ConnectionPill(
       type="button"
       className={buttonClassName}
       onClick={onRefresh}
-      title={checking ? "Connecting" : connection.message}
-      aria-label={checking ? "Connecting" : `Connection status: ${label}`}
-      aria-busy={checking}
+      aria-label={`Connection status: ${label}`}
     >
       <span className={statusIconClassName} aria-hidden="true">
         <span className={connectionDotClassName} />
         <RefreshCw
           size={12}
-          className={className(
-            connectionRefreshClassName,
-            checking && "animate-spin",
-          )}
+          className={connectionRefreshClassName}
         />
       </span>
       <span className={connectionLabelClassName}>{label}</span>

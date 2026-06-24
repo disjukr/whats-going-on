@@ -8,7 +8,7 @@ import { JotaiStoreScope } from "unsaturated/store";
 import type { TerminalLaunchSpec } from "../protocol/rpc.ts";
 import { copyExplorerNavigationState } from "./explorer.ts";
 import { copyFileViewerState } from "./file-viewer.ts";
-import { MachineIdScope } from "./machine-id.tsx";
+import { MachineIdScope } from "./machine.tsx";
 
 export type WorkbenchTool = "daemon" | "files" | "processes" | "terminal";
 

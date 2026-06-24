@@ -46,30 +46,6 @@ input:focus {
   outline-offset: 1px;
 }
 
-.machine-title-button.checking .machine-title-text {
-  background: linear-gradient(
-    100deg,
-    #20242d 0%,
-    #20242d 34%,
-    #ffffff 50%,
-    #20242d 66%,
-    #20242d 100%
-  );
-  background-clip: text;
-  background-size: 240% 100%;
-  color: transparent;
-  animation: machine-title-shimmer 1.4s linear infinite;
-}
-
-@keyframes machine-title-shimmer {
-  from {
-    background-position: 120% 0;
-  }
-
-  to {
-    background-position: -120% 0;
-  }
-}
 `;
 
 export default defineConfig({

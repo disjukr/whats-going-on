@@ -4,7 +4,6 @@ import type { AvailableShellInfo } from "../../protocol/rpc.ts";
 import type { Machine } from "../../state/machines.ts";
 import type { ConnectionState } from "../../state/types.ts";
 import type { WorkbenchTool } from "../../state/workbench.ts";
-import { className } from "../class-name.ts";
 import { ToolMenu } from "./tool-menu.tsx";
 
 interface MachinePanelProps {
@@ -96,10 +95,7 @@ export function MachinePanel(
                 ? (
                   <button
                     type="button"
-                    className={className(
-                      machineTitleButtonClassName,
-                      connection.phase === "checking" && "checking",
-                    )}
+                    className={machineTitleButtonClassName}
                     onMouseDown={(event) => event.stopPropagation()}
                     onClick={(event) => onOpenMachineMenu(event, machine)}
                     title="Machine actions"

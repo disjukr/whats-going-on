@@ -6,12 +6,8 @@ import {
   MachinePanelRegion,
 } from "./machine-panel/index.tsx";
 import { MachineRailRegion } from "./machine-rail/index.tsx";
-import { MachineIdContext } from "../state/machine-id.tsx";
+import { MachineBaseUrlContext, MachineIdContext } from "../state/machine.tsx";
 import { machineStoreBunja } from "../state/machine-store.ts";
-import {
-  RpcSessionKeyContext,
-  rpcSessionKeyForMachine,
-} from "../state/rpc-session.ts";
 import { layoutBunja } from "./state.tsx";
 import { TopBarRegion } from "./top-bar/index.tsx";
 import { WorkbenchRegion } from "./workbench/index.tsx";
@@ -83,9 +79,9 @@ function SelectedMachineIdProvider(
   const selected = useAtomValue(machineStore.selectedAtom);
   return (
     <MachineIdContext value={selected?.id}>
-      <RpcSessionKeyContext value={rpcSessionKeyForMachine(selected)}>
+      <MachineBaseUrlContext value={selected?.baseUrl}>
         {children}
-      </RpcSessionKeyContext>
+      </MachineBaseUrlContext>
     </MachineIdContext>
   );
 }

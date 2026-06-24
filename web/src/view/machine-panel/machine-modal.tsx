@@ -8,7 +8,7 @@ import {
   X,
 } from "lucide-react";
 import type { Machine } from "../../state/machines.ts";
-import type { ConnectionState, MachineModalMode } from "../../state/types.ts";
+import type { MachineModalMode } from "../../state/types.ts";
 import { Button } from "../ui/button.tsx";
 import { AddMachineForm } from "./add-machine-form.tsx";
 
@@ -65,7 +65,6 @@ interface MachineModalProps {
   configNameDraft: string;
   configNameInputRef: React.RefObject<HTMLInputElement | null>;
   configUrlDraft: string;
-  connection: ConnectionState;
   isRequestingPairingCode: boolean;
   isPairing: boolean;
   machineCount: number;
@@ -93,7 +92,6 @@ interface MachineModalProps {
 }
 
 interface PairMachineFormProps {
-  connection: ConnectionState;
   isRequestingPairingCode: boolean;
   isPairing: boolean;
   pairingCode: string;
@@ -149,7 +147,6 @@ export function MachineModal(
     configNameDraft,
     configNameInputRef,
     configUrlDraft,
-    connection,
     isRequestingPairingCode,
     isPairing,
     machineCount,
@@ -213,7 +210,6 @@ export function MachineModal(
         {mode === "pair" && selected
           ? (
             <PairMachineForm
-              connection={connection}
               isRequestingPairingCode={isRequestingPairingCode}
               isPairing={isPairing}
               pairingCode={pairingCode}
@@ -269,7 +265,6 @@ export function MachineModal(
 
 function PairMachineForm(
   {
-    connection,
     isRequestingPairingCode,
     isPairing,
     pairingCode,
@@ -306,9 +301,6 @@ function PairMachineForm(
             isRequestingPairingCode={isRequestingPairingCode}
           />
         )}
-      {connection.phase === "offline"
-        ? <div className={fieldErrorClassName}>{connection.message}</div>
-        : null}
       <div className={modalActionsClassName}>
         <Button onClick={onClose}>
           Skip

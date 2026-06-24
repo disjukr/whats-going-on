@@ -1,49 +1,52 @@
-import { createContext } from "react";
 import { bunja } from "bunja";
-import { createScopeFromContext } from "bunja/react";
-import { atom } from "jotai";
+import { atom, type PrimitiveAtom } from "jotai";
+import type { Store } from "jotai/vanilla/store";
 import { nowBunja } from "unsaturated/now";
 import { JotaiStoreScope } from "unsaturated/store";
 import {
   authenticateWebTransport,
   closeWebTransport as closeProtocolWebTransport,
+  completePairing,
   type DaemonInfo,
-  getDaemonInfo,
+  getDaemonInfoFromTransport,
   openWebTransport,
-  renewWebTransportCredential,
-  type RpcCallOptions,
+  renewClientCredential,
+  startPairing,
 } from "../protocol/rpc.ts";
 import {
   DatagramMessageKind,
   decodeDatagramMessage,
   encodeDatagramMessage,
 } from "../protocol/wire.ts";
+import { MachineBaseUrlScope } from "./machine.tsx";
 import { machineBunja, machineStoreBunja } from "./machine-store.ts";
 import type { Machine } from "./machines.ts";
-import { normalizeMachineUrl } from "./machines.ts";
 import type { ConnectionState } from "./types.ts";
 
 const CLIENT_CREDENTIAL_RENEWAL_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const DATAGRAM_PING_INTERVAL_MS = 5_000;
 const DATAGRAM_PING_TIMEOUT_MS = 5_000;
-const STATUS_PING_INTERVAL_MS = 5_000;
 
 interface DatagramRuntime {
   closed: boolean;
   nextPingId: number;
-  pendingPings: Map<number, PendingDatagramPing>;
+  onRtt: (rttMs: number) => void;
+  pendingPing?: DatagramPing;
+  pingInterval: ReturnType<typeof setInterval>;
   writer: WritableStreamDefaultWriter<Uint8Array>;
 }
 
-interface ManagedRpcSession {
-  datagrams: DatagramRuntime;
-  transport: WebTransport;
-}
-
-interface PendingDatagramPing {
-  reject: (err: Error) => void;
-  resolve: (latencyMs: number) => void;
+interface DatagramPing {
+  pingId: number;
   startedAt: number;
   timeout: ReturnType<typeof setTimeout>;
+}
+
+interface ManagedRpcSession {
+  authenticatedClientId?: string;
+  datagrams: DatagramRuntime;
+  credentialRenewalStarted: boolean;
+  transport: WebTransport;
 }
 
 interface IdleDaemonInfoState {
@@ -73,46 +76,65 @@ export type DaemonInfoState =
 
 interface RpcSessionState {
   connection: ConnectionState;
-  connectionEpoch: number;
   daemonInfo: DaemonInfoState;
 }
 
-interface ReachabilityResult {
-  latencyMs?: number;
+interface RpcSessionController {
+  close: () => void;
+  closeRpcSession: () => void;
+  completePairingSession: (code: string) => ReturnType<typeof completePairing>;
+  reconnect: () => void;
+  startPairingSession: (
+    confirmationCode: string,
+    clientLabel: string,
+  ) => ReturnType<typeof startPairing>;
+  stateAtom: PrimitiveAtom<RpcSessionState>;
+  webTransport: () => Promise<WebTransport>;
 }
 
-export const RpcSessionKeyContext = createContext<string | undefined>(
-  undefined,
-);
-export const RpcSessionKeyScope = createScopeFromContext(
-  RpcSessionKeyContext,
-);
+interface RpcSessionControllerEnv {
+  getMachine: () => Machine | undefined;
+  machineId: string;
+  onAuthenticatedSessionInvalidated: () => void;
+  setMachineCredentialExpiry: (
+    machineId: string,
+    clientCredentialExpiresAtUnix: number,
+  ) => void;
+  store: Store;
+}
+
+function initialRpcSessionState(): RpcSessionState {
+  return {
+    connection: { phase: "idle" },
+    daemonInfo: { phase: "idle" },
+  };
+}
 
 export const rpcSessionBunja = bunja(() => {
+  bunja.use(MachineBaseUrlScope);
   const store = bunja.use(JotaiStoreScope);
   const machineState = bunja.use(machineBunja);
   const machines = bunja.use(machineStoreBunja);
   const now = bunja.use(nowBunja);
-  const rpcSessionKey = bunja.use(RpcSessionKeyScope);
-  let current: Promise<ManagedRpcSession> | undefined;
-  let pingGeneration = 0;
-  let daemonInfoGeneration = 0;
-  let stopped = false;
-  let pingTimer: ReturnType<typeof setTimeout> | undefined;
+  let activeController: RpcSessionController | undefined;
+  const idleRpcSessionState = initialRpcSessionState();
 
-  const rpcSessionAtom = atom<RpcSessionState>({
-    connection: {
-      phase: "idle",
-      message: "No machine selected",
-    },
-    connectionEpoch: 0,
-    daemonInfo: { phase: "idle" },
+  const activeControllerAtom = atom<RpcSessionController | undefined>(
+    undefined,
+  );
+  const rpcSessionAtom = atom<RpcSessionState>((get) => {
+    const controller = get(activeControllerAtom);
+    if (!controller) return idleRpcSessionState;
+    return get(controller.stateAtom);
   });
   const connectionAtom = atom((get) => get(rpcSessionAtom).connection);
-  const connectionEpochAtom = atom((get) =>
-    get(rpcSessionAtom).connectionEpoch
-  );
   const daemonInfoAtom = atom((get) => get(rpcSessionAtom).daemonInfo);
+  const daemonInstanceIdAtom = atom((get) => {
+    const daemonInfo = get(daemonInfoAtom);
+    return daemonInfo.phase === "ready"
+      ? daemonInfo.daemonInfo.instanceId
+      : undefined;
+  });
   const daemonServerTimeMsAtom = atom((get) => {
     const daemonInfo = get(daemonInfoAtom);
     if (daemonInfo.phase !== "ready") return undefined;
@@ -136,88 +158,255 @@ export const rpcSessionBunja = bunja(() => {
     );
     return Math.max(0, uptimeSeconds);
   });
-  const selectedConnectionKeyAtom = atom((get) =>
-    connectionKey(get(machineState.machineAtom))
-  );
-
-  bunja.effect(() => () => {
-    stopped = true;
-    nextPingGeneration();
-    clearPingTimer();
-    closeRpcSession();
-  });
-
   bunja.effect(() => {
-    const unsubscribe = store.sub(selectedConnectionKeyAtom, restartPingLoop);
-    restartPingLoop();
+    replaceController();
     return () => {
-      stopped = true;
-      nextPingGeneration();
-      clearPingTimer();
-      unsubscribe();
+      disposeController();
     };
   });
 
-  function authenticatedRpcSession(): Promise<ManagedRpcSession> {
-    if (!rpcSessionKey) {
-      return openAuthenticatedWebTransport();
-    }
+  function controller(): RpcSessionController {
+    const current = activeController;
     if (current) return current;
-    const session = openAuthenticatedWebTransport();
-    current = session;
-    session.then((rpcSession) => {
-      rpcSession.transport.closed.catch(() => {}).finally(() => {
-        if (current === session) current = undefined;
-        if (!stopped) handleTransportClosed();
-      });
-    }).catch(() => {
-      if (current === session) current = undefined;
-    });
-    return session;
+    const controller = instantiateController();
+    if (!controller) {
+      throw new Error("missing machine");
+    }
+    setActiveController(controller);
+    return controller;
+  }
+
+  function replaceController() {
+    disposeController();
+    setActiveController(instantiateController());
+  }
+
+  function disposeController() {
+    activeController?.close();
+    setActiveController(undefined);
+  }
+
+  function setActiveController(
+    controller: RpcSessionController | undefined,
+  ) {
+    activeController = controller;
+    store.set(activeControllerAtom, controller);
+  }
+
+  function instantiateController(): RpcSessionController | undefined {
+    const machineId = machineState.machineId;
+    if (!machineId || !store.get(machineState.machineAtom)) {
+      return undefined;
+    }
+    let rpcController: RpcSessionController;
+    rpcController = createRpcSessionController(
+      controllerEnv(machineId, () => {
+        if (activeController === rpcController) {
+          rpcController.closeRpcSession();
+        }
+      }),
+    );
+    return rpcController;
+  }
+
+  function controllerEnv(
+    machineId: string,
+    onAuthenticatedSessionInvalidated: () => void,
+  ): RpcSessionControllerEnv {
+    return {
+      getMachine: () => machines.findMachine(machineId),
+      machineId,
+      onAuthenticatedSessionInvalidated,
+      setMachineCredentialExpiry: machines.setMachineCredentialExpiry,
+      store,
+    };
+  }
+
+  function closeRpcSession() {
+    activeController?.closeRpcSession();
+  }
+
+  function reconnect() {
+    activeController?.reconnect();
+  }
+
+  function resetController() {
+    replaceController();
+  }
+
+  function startPairingSession(
+    confirmationCode: string,
+    clientLabel: string,
+  ) {
+    return controller().startPairingSession(
+      confirmationCode,
+      clientLabel,
+    );
+  }
+
+  function completePairingSession(
+    code: string,
+  ) {
+    return controller().completePairingSession(code);
+  }
+
+  function webTransport(): Promise<WebTransport> {
+    return controller().webTransport();
+  }
+
+  return {
+    closeRpcSession,
+    connectionAtom,
+    daemonInfoAtom,
+    daemonInstanceIdAtom,
+    daemonServerTimeMsAtom,
+    daemonUptimeSecondsAtom,
+    completePairingSession,
+    reconnect,
+    resetController,
+    startPairingSession,
+    webTransport,
+  };
+});
+
+function createRpcSessionController(
+  env: RpcSessionControllerEnv,
+): RpcSessionController {
+  let closed = false;
+  let pairingStarted = false;
+  let rpcSession: Promise<ManagedRpcSession> | undefined;
+  const stateAtom = atom<RpcSessionState>(initialRpcSessionState());
+
+  const rpcController: RpcSessionController = {
+    close,
+    closeRpcSession,
+    completePairingSession,
+    reconnect,
+    startPairingSession,
+    stateAtom,
+    webTransport: authenticatedWebTransport,
+  };
+
+  void openInitialSession();
+
+  function close() {
+    if (closed) return;
+    closed = true;
+    closeRpcSession();
+  }
+
+  function reconnect() {
+    closeRpcSession();
+    void openInitialSession();
+  }
+
+  async function openInitialSession(): Promise<void> {
+    try {
+      await getRpcSession();
+    } catch {
+      if (!closed) setConnectionOffline();
+    }
+  }
+
+  function authenticatedRpcSession(): Promise<ManagedRpcSession> {
+    const machine = currentMachine();
+    if (!machine?.clientId || !machine.clientSecret) {
+      throw new Error("missing paired client credentials");
+    }
+    return getAuthenticatedRpcSession(machine);
   }
 
   async function authenticatedWebTransport(): Promise<WebTransport> {
     return (await authenticatedRpcSession()).transport;
   }
 
-  async function openAuthenticatedWebTransport(): Promise<
-    ManagedRpcSession
-  > {
-    const machine = store.get(machineState.machineAtom);
-    if (!machine?.clientId || !machine.clientSecret) {
-      throw new Error("missing paired client credentials");
-    }
+  function getRpcSession(): Promise<ManagedRpcSession> {
+    if (rpcSession) return rpcSession;
+    const machine = currentMachine();
+    if (!machine) throw new Error("missing machine");
+    const session = openRpcSession(machine);
+    rpcSession = session;
+    session.then((openedSession) => {
+      openedSession.transport.closed.catch(() => {}).finally(() => {
+        if (rpcSession !== session || closed) return;
+        rpcSession = undefined;
+        handleTransportClosed();
+      });
+    }).catch(() => {
+      if (rpcSession === session) {
+        rpcSession = undefined;
+        if (!closed) setConnectionOffline();
+      }
+    });
+    return session;
+  }
+
+  async function getAuthenticatedRpcSession(
+    machine: Machine,
+  ): Promise<ManagedRpcSession> {
+    const session = await getRpcSession();
+    await authenticateManagedSession(session, machine);
+    return session;
+  }
+
+  async function openRpcSession(machine: Machine): Promise<ManagedRpcSession> {
     const session = manageRpcSession(
       await openWebTransport(machine, "/rpc"),
+      setDatagramRtt,
     );
-    try {
-      await authenticateWebTransport(
-        session.transport,
-        machine.clientId,
-        machine.clientSecret,
-      );
-    } catch (err) {
+    if (closed) {
       closeManagedRpcSession(session);
-      throw err;
+      throw new Error("RPC session was closed");
     }
-    await renewCredential(session);
-    startCredentialRenewalLoop(session);
-    markReachable("Connected", undefined, { phase: "loading" });
+    if (machine.clientId && machine.clientSecret) {
+      try {
+        await authenticateManagedSession(session, machine);
+      } catch (err) {
+        closeManagedRpcSession(session);
+        throw err;
+      }
+      if (closed) {
+        closeManagedRpcSession(session);
+        throw new Error("RPC session was closed");
+      }
+      await renewCredential(session);
+      if (closed) {
+        closeManagedRpcSession(session);
+        throw new Error("RPC session was closed");
+      }
+    }
+    setState((state) => ({
+      ...state,
+      connection: { phase: "reachable" },
+      daemonInfo: { phase: "loading" },
+    }));
     void refreshDaemonInfoForCurrentMachine({ loadingAlreadySet: true });
     return session;
   }
 
   async function renewCredential(session: ManagedRpcSession): Promise<void> {
-    const machine = store.get(machineState.machineAtom);
-    if (!machine?.clientId || !machine.clientSecret) return;
-    await renewWebTransportCredential(
-      machine,
-      session.transport,
-      machines.rpcCallOptions(),
-    );
+    const machine = currentMachine();
+    if (closed || !machine?.clientId || !machine.clientSecret) return;
+    try {
+      const renewal = await renewClientCredential(session.transport);
+      if (
+        currentMachine()?.clientId === session.authenticatedClientId &&
+        currentMachine()?.clientSecret === machine.clientSecret
+      ) {
+        env.setMachineCredentialExpiry(
+          machine.id,
+          renewal.clientCredentialExpiresAtUnix,
+        );
+      }
+    } catch {
+      // A valid session can still be useful even if credential renewal fails.
+      // The next renewal tick or authenticated session will retry.
+    }
   }
 
   function startCredentialRenewalLoop(session: ManagedRpcSession): void {
+    if (session.credentialRenewalStarted) return;
+    session.credentialRenewalStarted = true;
     const timer = setInterval(
       () => void renewCredential(session),
       CLIENT_CREDENTIAL_RENEWAL_INTERVAL_MS,
@@ -228,150 +417,132 @@ export const rpcSessionBunja = bunja(() => {
   }
 
   function closeRpcSession() {
-    const session = current;
-    current = undefined;
+    pairingStarted = false;
+    const session = rpcSession;
+    rpcSession = undefined;
     session?.then(closeManagedRpcSession).catch(() => {});
+    if (!closed) setConnectionOffline();
   }
 
-  function reconnect() {
-    closeRpcSession();
-    restartPingLoop();
-  }
-
-  function rpcCallOptions(): Pick<
-    RpcCallOptions,
-    "closeRpcSession" | "rpcSession"
-  > {
-    return {
-      closeRpcSession,
-      rpcSession: authenticatedWebTransport,
-    };
-  }
-
-  function setChecking(
-    message: string,
-    options: { clearDaemonInfo?: boolean } = {},
+  async function startPairingSession(
+    confirmationCode: string,
+    clientLabel: string,
   ) {
-    store.set(rpcSessionAtom, (state) => ({
-      ...state,
-      connection: { phase: "checking", message },
-      daemonInfo: options.clearDaemonInfo
-        ? { phase: "idle" }
-        : state.daemonInfo,
-    }));
+    const machine = currentMachine();
+    if (!machine) throw new Error("missing machine");
+    pairingStarted = false;
+    return await withControllerRpcSession(
+      getRpcSession(),
+      async (session) => {
+        const response = await startPairing(
+          session.transport,
+          machine,
+          confirmationCode,
+          clientLabel,
+        );
+        pairingStarted = true;
+        return response;
+      },
+    );
   }
 
-  function markReachable(
-    message: string,
-    latencyMs?: number,
-    daemonInfoOnReconnect?: DaemonInfoState,
+  async function completePairingSession(
+    code: string,
+  ) {
+    if (!pairingStarted || !rpcSession) {
+      throw new Error("Pairing was not started on this connection");
+    }
+    const credentials = await withControllerRpcSession(
+      rpcSession,
+      (session) => completePairing(session.transport, code),
+    );
+    const session = await rpcSession;
+    await authenticateManagedSessionWithCredential(
+      session,
+      credentials.clientId,
+      credentials.clientSecret,
+    );
+    return credentials;
+  }
+
+  async function withControllerRpcSession<T>(
+    session: Promise<ManagedRpcSession>,
+    run: (session: ManagedRpcSession) => Promise<T>,
+  ): Promise<T> {
+    const managedSession = await session;
+    if (!isControllerRpcSession(session)) {
+      closeManagedRpcSession(managedSession);
+      throw new Error("Pairing was not started on this connection");
+    }
+    return run(managedSession);
+  }
+
+  function isControllerRpcSession(
+    session: Promise<ManagedRpcSession>,
   ): boolean {
-    const state = store.get(rpcSessionAtom);
-    const becameReachable = state.connection.phase !== "reachable";
-    store.set(rpcSessionAtom, {
-      ...state,
-      connection: { phase: "reachable", message, latencyMs },
-      connectionEpoch: becameReachable
-        ? state.connectionEpoch + 1
-        : state.connectionEpoch,
-      daemonInfo: becameReachable && daemonInfoOnReconnect
-        ? daemonInfoOnReconnect
-        : state.daemonInfo,
-    });
-    return becameReachable;
+    return !closed &&
+      rpcSession === session;
   }
 
-  function markOffline(message: string) {
-    store.set(rpcSessionAtom, (state) => ({
-      ...state,
-      connection: { phase: "offline", message },
-      daemonInfo: { phase: "idle" },
-    }));
-  }
-
-  function restartPingLoop() {
-    clearPingTimer();
-    const generation = nextPingGeneration();
-    const machine = store.get(machineState.machineAtom);
-    if (!machine) {
-      store.set(rpcSessionAtom, (state) => ({
-        ...state,
-        connection: {
-          phase: "idle",
-          message: "No machine selected",
-        },
-        daemonInfo: { phase: "idle" },
-      }));
-      return;
-    }
-    void pingStatus(machine, true, generation);
-  }
-
-  async function pingStatus(
-    machine: Machine,
-    showChecking: boolean,
-    generation: number,
+  function setState(
+    update: (state: RpcSessionState) => RpcSessionState,
   ) {
-    const key = connectionKey(machine);
-    if (showChecking) {
-      setChecking("Checking transport", { clearDaemonInfo: true });
-    }
+    env.store.set(stateAtom, update);
+  }
 
-    try {
-      const reachability = await checkReachable(machine);
-      if (!isCurrentPing(generation, key)) return;
-      const becameReachable = markReachable(
-        formatReachability(reachability),
-        reachability.latencyMs,
-        { phase: "loading" },
-      );
-      if (becameReachable) {
-        void refreshDaemonInfoForCurrentMachine({ loadingAlreadySet: true });
-      }
-    } catch (err) {
-      if (!isCurrentPing(generation, key)) return;
-      markOffline(connectionErrorMessage(err, machine));
-    } finally {
-      if (isCurrentPing(generation, key)) {
-        schedulePing(machine, generation, STATUS_PING_INTERVAL_MS);
-      }
+  function currentMachine(): Machine | undefined {
+    return env.getMachine();
+  }
+
+  async function authenticateManagedSession(
+    session: ManagedRpcSession,
+    machine: Machine,
+  ): Promise<void> {
+    if (!machine.clientId || !machine.clientSecret) {
+      throw new Error("missing paired client credentials");
     }
+    await authenticateManagedSessionWithCredential(
+      session,
+      machine.clientId,
+      machine.clientSecret,
+    );
+  }
+
+  async function authenticateManagedSessionWithCredential(
+    session: ManagedRpcSession,
+    clientId: string,
+    clientSecret: string,
+  ): Promise<void> {
+    if (session.authenticatedClientId === clientId) return;
+    await authenticateWebTransport(
+      session.transport,
+      clientId,
+      clientSecret,
+    );
+    session.authenticatedClientId = clientId;
+    startCredentialRenewalLoop(session);
   }
 
   function handleTransportClosed() {
-    const machine = store.get(machineState.machineAtom);
-    if (!machine) return;
-    markOffline("Connection lost");
-    const generation = nextPingGeneration();
-    clearPingTimer();
-    schedulePing(machine, generation, 0);
+    if (closed) return;
+    setConnectionOffline();
   }
 
   async function refreshDaemonInfoForCurrentMachine(
     options: { loadingAlreadySet?: boolean } = {},
   ): Promise<void> {
-    const generation = ++daemonInfoGeneration;
-    const machine = store.get(machineState.machineAtom);
-    const key = connectionKey(machine);
-    if (!machine) {
-      store.set(rpcSessionAtom, (state) => ({
-        ...state,
-        daemonInfo: { phase: "idle" },
-      }));
-      return;
-    }
-
     if (!options.loadingAlreadySet) {
-      store.set(rpcSessionAtom, (state) => ({
+      setState((state) => ({
         ...state,
         daemonInfo: { phase: "loading" },
       }));
     }
     try {
-      const daemonInfo = await getDaemonInfo(machine);
-      if (generation !== daemonInfoGeneration) return;
-      if (key !== connectionKey(store.get(machineState.machineAtom))) return;
-      store.set(rpcSessionAtom, (state) => ({
+      const session = await getRpcSession();
+      if (closed) return;
+      const daemonInfo = await getDaemonInfoFromTransport(session.transport);
+      if (closed) return;
+      setState((state) => ({
         ...state,
         daemonInfo: {
           phase: "ready",
@@ -380,9 +551,8 @@ export const rpcSessionBunja = bunja(() => {
         },
       }));
     } catch (err) {
-      if (generation !== daemonInfoGeneration) return;
-      if (key !== connectionKey(store.get(machineState.machineAtom))) return;
-      store.set(rpcSessionAtom, (state) => ({
+      if (closed) return;
+      setState((state) => ({
         ...state,
         daemonInfo: {
           phase: "error",
@@ -392,94 +562,41 @@ export const rpcSessionBunja = bunja(() => {
     }
   }
 
-  function schedulePing(
-    machine: Machine,
-    generation: number,
-    delayMs: number,
-  ) {
-    pingTimer = setTimeout(
-      () => void pingStatus(machine, false, generation),
-      delayMs,
-    );
+  function setConnectionOffline() {
+    setState((state) => ({
+      ...state,
+      connection: { phase: "offline" },
+      daemonInfo: { phase: "idle" },
+    }));
   }
 
-  function clearPingTimer() {
-    if (pingTimer !== undefined) {
-      clearTimeout(pingTimer);
-      pingTimer = undefined;
-    }
+  function setDatagramRtt(rttMs: number) {
+    setState((state) => {
+      if (state.connection.phase !== "reachable") return state;
+      return {
+        ...state,
+        connection: { ...state.connection, rttMs },
+      };
+    });
   }
 
-  function nextPingGeneration(): number {
-    pingGeneration += 1;
-    return pingGeneration;
-  }
-
-  function isCurrentPing(generation: number, key: string): boolean {
-    return !stopped &&
-      pingGeneration === generation &&
-      store.get(selectedConnectionKeyAtom) === key;
-  }
-
-  async function checkReachable(machine: Machine): Promise<ReachabilityResult> {
-    const startedAt = performance.now();
-    if (machine.clientId && machine.clientSecret) {
-      const session = await authenticatedRpcSession();
-      try {
-        return {
-          latencyMs: await pingDatagram(session.datagrams),
-        };
-      } catch (err) {
-        if (err instanceof DatagramPingTimeoutError) return {};
-        closeRpcSession();
-        throw err;
-      }
-    }
-
-    const session = await openWebTransport(machine, "/rpc");
-    try {
-      return { latencyMs: performance.now() - startedAt };
-    } finally {
-      closeProtocolWebTransport(session);
-    }
-  }
-
-  return {
-    closeRpcSession,
-    connectionAtom,
-    connectionEpochAtom,
-    daemonInfoAtom,
-    daemonServerTimeMsAtom,
-    daemonUptimeSecondsAtom,
-    markOffline,
-    markReachable,
-    reconnect,
-    rpcCallOptions,
-    setChecking,
-  };
-});
-
-class DatagramPingTimeoutError extends Error {
-  constructor(timeoutMs: number) {
-    super(`datagram pong timed out after ${timeoutMs}ms`);
-    this.name = "DatagramPingTimeoutError";
-  }
+  return rpcController;
 }
 
 function manageRpcSession(
   transport: WebTransport,
+  onDatagramRtt: (rttMs: number) => void,
 ): ManagedRpcSession {
   const managed = {
-    datagrams: startDatagramRuntime(transport),
+    authenticatedClientId: undefined,
+    datagrams: startDatagramRuntime(transport, onDatagramRtt),
+    credentialRenewalStarted: false,
     transport,
   };
   transport.closed
     .catch(() => {})
     .finally(() => {
-      closeDatagramRuntime(
-        managed.datagrams,
-        new Error("WebTransport session closed"),
-      );
+      closeDatagramRuntime(managed.datagrams);
     });
   return managed;
 }
@@ -487,21 +604,26 @@ function manageRpcSession(
 function closeManagedRpcSession(
   session: ManagedRpcSession,
 ): void {
-  closeDatagramRuntime(
-    session.datagrams,
-    new Error("RPC session closed"),
-  );
+  closeDatagramRuntime(session.datagrams);
   closeProtocolWebTransport(session.transport);
 }
 
-function startDatagramRuntime(transport: WebTransport): DatagramRuntime {
+function startDatagramRuntime(
+  transport: WebTransport,
+  onRtt: (rttMs: number) => void,
+): DatagramRuntime {
   const runtime: DatagramRuntime = {
     closed: false,
     nextPingId: 0,
-    pendingPings: new Map(),
+    onRtt,
+    pingInterval: setInterval(
+      () => sendDatagramPing(runtime),
+      DATAGRAM_PING_INTERVAL_MS,
+    ),
     writer: transport.datagrams.writable.getWriter(),
   };
   void readDatagrams(transport, runtime);
+  sendDatagramPing(runtime);
   return runtime;
 }
 
@@ -517,10 +639,7 @@ async function readDatagrams(
       await handleIncomingDatagram(runtime, value);
     }
   } catch (err) {
-    closeDatagramRuntime(
-      runtime,
-      err instanceof Error ? err : new Error(String(err)),
-    );
+    closeDatagramRuntime(runtime);
   } finally {
     try {
       reader.releaseLock();
@@ -548,127 +667,64 @@ async function handleIncomingDatagram(
         pingId: message.pingId,
       }));
     } catch {
-      closeDatagramRuntime(runtime, new Error("failed to send datagram pong"));
+      closeDatagramRuntime(runtime);
     }
     return;
   }
 
-  const pending = runtime.pendingPings.get(message.pingId);
-  if (!pending) return;
-
-  runtime.pendingPings.delete(message.pingId);
-  clearTimeout(pending.timeout);
-  pending.resolve(performance.now() - pending.startedAt);
+  if (message.kind === DatagramMessageKind.Pong) {
+    const pending = runtime.pendingPing;
+    if (!pending || pending.pingId !== message.pingId) return;
+    clearPendingDatagramPing(runtime);
+    runtime.onRtt(
+      Math.max(1, Math.round(performance.now() - pending.startedAt)),
+    );
+  }
 }
 
-function pingDatagram(
-  runtime: DatagramRuntime,
-  timeoutMs = DATAGRAM_PING_TIMEOUT_MS,
-): Promise<number> {
-  if (runtime.closed) {
-    return Promise.reject(new Error("datagram runtime is closed"));
-  }
-
-  const pingId = nextPingId(runtime);
-  const startedAt = performance.now();
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      runtime.pendingPings.delete(pingId);
-      reject(new DatagramPingTimeoutError(timeoutMs));
-    }, timeoutMs);
-    const pending: PendingDatagramPing = {
-      reject,
-      resolve,
-      startedAt,
-      timeout,
-    };
-    runtime.pendingPings.set(pingId, pending);
-
-    runtime.writer.write(encodeDatagramMessage({
-      kind: DatagramMessageKind.Ping,
-      pingId,
-    })).catch((err) => {
-      if (runtime.pendingPings.get(pingId) !== pending) return;
-      runtime.pendingPings.delete(pingId);
-      clearTimeout(timeout);
-      const error = err instanceof Error ? err : new Error(String(err));
-      closeDatagramRuntime(runtime, error);
-      reject(error);
-    });
+function sendDatagramPing(runtime: DatagramRuntime): void {
+  if (runtime.closed) return;
+  clearPendingDatagramPing(runtime);
+  const pingId = nextDatagramPingId(runtime);
+  const pending: DatagramPing = {
+    pingId,
+    startedAt: performance.now(),
+    timeout: setTimeout(() => {
+      if (runtime.pendingPing !== pending) return;
+      runtime.pendingPing = undefined;
+    }, DATAGRAM_PING_TIMEOUT_MS),
+  };
+  runtime.pendingPing = pending;
+  runtime.writer.write(encodeDatagramMessage({
+    kind: DatagramMessageKind.Ping,
+    pingId,
+  })).catch(() => {
+    if (runtime.pendingPing === pending) clearPendingDatagramPing(runtime);
+    closeDatagramRuntime(runtime);
   });
 }
 
-function nextPingId(runtime: DatagramRuntime): number {
+function nextDatagramPingId(runtime: DatagramRuntime): number {
   runtime.nextPingId = runtime.nextPingId >= Number.MAX_SAFE_INTEGER
     ? 1
     : runtime.nextPingId + 1;
   return runtime.nextPingId;
 }
 
-function closeDatagramRuntime(runtime: DatagramRuntime, err: Error): void {
+function clearPendingDatagramPing(runtime: DatagramRuntime): void {
+  if (!runtime.pendingPing) return;
+  clearTimeout(runtime.pendingPing.timeout);
+  runtime.pendingPing = undefined;
+}
+
+function closeDatagramRuntime(runtime: DatagramRuntime): void {
   if (runtime.closed) return;
   runtime.closed = true;
-  for (const [pingId, pending] of runtime.pendingPings) {
-    runtime.pendingPings.delete(pingId);
-    clearTimeout(pending.timeout);
-    pending.reject(err);
-  }
+  clearInterval(runtime.pingInterval);
+  clearPendingDatagramPing(runtime);
   try {
     runtime.writer.releaseLock();
   } catch {
     // The writer may be in an errored state after transport shutdown.
-  }
-}
-
-export function rpcSessionKeyForMachine(
-  machine?: Machine,
-): string | undefined {
-  if (!machine?.clientId || !machine.clientSecret) return undefined;
-  return [
-    machine.id,
-    normalizeMachineUrl(machine.baseUrl),
-    machine.clientId,
-    machine.clientSecret,
-  ].join("\n");
-}
-
-function connectionKey(machine?: Machine): string {
-  if (!machine) return "";
-  return [
-    machine.id,
-    machine.baseUrl,
-    machine.clientId ?? "",
-    machine.clientSecret ?? "",
-  ].join("\n");
-}
-
-function formatReachability(reachability: ReachabilityResult): string {
-  if (reachability.latencyMs === undefined) return "Connected";
-  return `${Math.max(1, Math.round(reachability.latencyMs))}ms`;
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-export function connectionErrorMessage(
-  err: unknown,
-  machine?: Machine,
-): string {
-  const message = errorMessage(err);
-  if (!message.toLowerCase().includes("handshake")) return message;
-
-  const host = machine ? safeHost(machine.baseUrl) : "";
-  if (host === "localhost" || host === "127.0.0.1" || host === "::1") {
-    return "WebTransport TLS handshake failed. Use the daemon URL printed by the pairing command; localhost will fail when the daemon certificate is issued for another host.";
-  }
-  return "WebTransport TLS handshake failed. Check that the daemon URL matches a trusted certificate host.";
-}
-
-function safeHost(raw: string): string {
-  try {
-    return new URL(raw).hostname.toLowerCase();
-  } catch {
-    return "";
   }
 }

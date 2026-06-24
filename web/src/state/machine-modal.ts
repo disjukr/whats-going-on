@@ -1,17 +1,10 @@
 import { bunja } from "bunja";
 import { atom } from "jotai";
 import { JotaiStoreScope } from "unsaturated/store";
-import {
-  closeWebTransport,
-  completePairing,
-  openWebTransport,
-  RpcError,
-  startPairing,
-} from "../protocol/rpc.ts";
 import { machineMenuBunja } from "./machine-menu.ts";
 import { machineStoreBunja } from "./machine-store.ts";
 import { Machine, normalizeMachineUrl } from "./machines.ts";
-import { connectionErrorMessage, rpcSessionBunja } from "./rpc-session.ts";
+import { rpcSessionBunja } from "./rpc-session.ts";
 import { MachineModalMode } from "./types.ts";
 
 export const machineModalBunja = bunja(() => {
@@ -36,8 +29,6 @@ export const machineModalBunja = bunja(() => {
     machineModalTitle(get(machineModalModeAtom))
   );
   let pairingRequestSerial = 0;
-  let pairingSession: Promise<WebTransport> | undefined;
-  let pairingSessionKey = "";
 
   function addMachine() {
     store.set(machineFormErrorAtom, "");
@@ -150,7 +141,6 @@ export const machineModalBunja = bunja(() => {
   function deleteSelectedMachine() {
     const deleted = machines.deleteSelectedMachine();
     if (!deleted) return;
-    closePairingSession();
     store.set(machineFormErrorAtom, "");
     cancelPairingRequest();
     resetPairingCode();
@@ -163,19 +153,14 @@ export const machineModalBunja = bunja(() => {
     const code = store.get(pairingCodeAtom).trim();
     if (!code) return;
     store.set(isPairingAtom, true);
-    rpcSession.setChecking("Pairing");
+    store.set(machineFormErrorAtom, "");
     try {
-      const session = await currentPairingSession(selected);
-      const credentials = await completePairing(session, code);
+      const credentials = await rpcSession.completePairingSession(code);
       machines.setMachineCredentials(selected.id, credentials);
       resetPairingCode();
-      rpcSession.markReachable("Paired", 0);
       store.set(machineModalModeAtom, undefined);
     } catch (err) {
-      if (!(err instanceof RpcError && err.code === "InvalidPairingCode")) {
-        closePairingSession();
-      }
-      rpcSession.markOffline(connectionErrorMessage(err, selected));
+      store.set(machineFormErrorAtom, errorMessage(err));
     } finally {
       store.set(isPairingAtom, false);
     }
@@ -189,25 +174,18 @@ export const machineModalBunja = bunja(() => {
     resetPairingCode();
     store.set(pairingConfirmationCodeAtom, confirmationCode);
     store.set(isRequestingPairingCodeAtom, true);
-    rpcSession.setChecking("Requesting pairing");
-    const sessionPromise = openPairingSession(machine);
     void (async () => {
       try {
-        const session = await sessionPromise;
-        if (!isCurrentPairingSession(machine, sessionPromise)) return;
-        const { pairingCodeExpiresAtUnix } = await startPairing(
-          session,
-          machine,
-          confirmationCode,
-          clientLabel,
-        );
+        const { pairingCodeExpiresAtUnix } = await rpcSession
+          .startPairingSession(
+            confirmationCode,
+            clientLabel,
+          );
         if (!isCurrentPairingRequest(machine, serial)) return;
         store.set(pairingCodeExpiresAtUnixAtom, pairingCodeExpiresAtUnix);
-        rpcSession.markReachable("Pairing requested", 0);
       } catch (err) {
         if (!isCurrentPairingRequest(machine, serial)) return;
         store.set(machineFormErrorAtom, errorMessage(err));
-        rpcSession.markOffline(connectionErrorMessage(err, machine));
       } finally {
         if (serial === pairingRequestSerial) {
           store.set(isRequestingPairingCodeAtom, false);
@@ -228,7 +206,6 @@ export const machineModalBunja = bunja(() => {
   }
 
   function resetPairingCode() {
-    closePairingSession();
     store.set(pairingCodeAtom, "");
     store.set(pairingConfirmationCodeAtom, undefined);
     store.set(pairingCodeExpiresAtUnixAtom, undefined);
@@ -239,50 +216,6 @@ export const machineModalBunja = bunja(() => {
       store.get(machineModalModeAtom) === "pair" &&
       store.get(machines.selectedAtom)?.id === machine.id &&
       !!machines.findMachine(machine.id);
-  }
-
-  function openPairingSession(machine: Machine): Promise<WebTransport> {
-    closePairingSession();
-    const session = openWebTransport(machine);
-    pairingSession = session;
-    pairingSessionKey = pairingKey(machine);
-    session.catch(() => {
-      if (pairingSession === session) {
-        pairingSession = undefined;
-        pairingSessionKey = "";
-      }
-    });
-    return session;
-  }
-
-  async function currentPairingSession(
-    machine: Machine,
-  ): Promise<WebTransport> {
-    const session = pairingSession;
-    if (!session || pairingSessionKey !== pairingKey(machine)) {
-      throw new Error("Pairing was not started on this connection");
-    }
-    const resolved = await session;
-    if (!isCurrentPairingSession(machine, session)) {
-      closeWebTransport(resolved);
-      throw new Error("Pairing was not started on this connection");
-    }
-    return resolved;
-  }
-
-  function closePairingSession() {
-    const session = pairingSession;
-    pairingSession = undefined;
-    pairingSessionKey = "";
-    session?.then(closeWebTransport).catch(() => {});
-  }
-
-  function isCurrentPairingSession(
-    machine: Machine,
-    session: Promise<WebTransport>,
-  ): boolean {
-    return pairingSession === session &&
-      pairingSessionKey === pairingKey(machine);
   }
 
   function updateMachineNameDraft(value: string) {
@@ -364,11 +297,4 @@ function createPairingConfirmationCode(): string {
 
 function browserClientLabel(): string {
   return globalThis.navigator?.userAgent.trim() || "web";
-}
-
-function pairingKey(machine: Machine): string {
-  return [
-    machine.id,
-    normalizeMachineUrl(machine.baseUrl),
-  ].join("\n");
 }

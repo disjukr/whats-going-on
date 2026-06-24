@@ -1,9 +1,8 @@
 import { bunja } from "bunja";
 import { atom } from "jotai";
 import { JotaiStoreScope } from "unsaturated/store";
-import type { RpcCallOptions } from "../protocol/rpc.ts";
 import { loadMachines, Machine, saveMachines } from "./machines.ts";
-import { MachineIdScope } from "./machine-id.tsx";
+import { MachineIdScope } from "./machine.tsx";
 
 const initialMachines = loadMachines();
 const SELECTED_MACHINE_STORAGE_KEY = "wgo.selected-machine-id.v1";
@@ -98,26 +97,6 @@ export const machineStoreBunja = bunja(() => {
     })
   );
 
-  function rpcCallOptions(extra: RpcCallOptions = {}): RpcCallOptions {
-    return {
-      ...extra,
-      onClientCredentialRenewal: (renewal) => {
-        extra.onClientCredentialRenewal?.(renewal);
-        const machine = getMachine(store.get(machinesAtom), renewal.machineId);
-        if (
-          machine?.clientId !== renewal.clientId ||
-          machine.clientSecret !== renewal.clientSecret
-        ) {
-          return;
-        }
-        setMachineCredentialExpiry(
-          renewal.machineId,
-          renewal.clientCredentialExpiresAtUnix,
-        );
-      },
-    };
-  }
-
   return {
     machinesAtom,
     selectedIdAtom,
@@ -130,7 +109,6 @@ export const machineStoreBunja = bunja(() => {
     setMachineCredentials,
     clearMachineCredentials,
     setMachineCredentialExpiry,
-    rpcCallOptions,
     deleteSelectedMachine,
   };
 });

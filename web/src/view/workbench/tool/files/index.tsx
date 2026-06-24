@@ -117,14 +117,14 @@ export function FilesTool() {
   const filesTool = useBunja(filesToolBunja);
   const machine = useAtomValue(machineStore.selectedAtom);
   const isPaired = useAtomValue(machineStore.selectedIsPairedAtom);
-  const connectionEpoch = useAtomValue(rpcSession.connectionEpochAtom);
+  const daemonInstanceId = useAtomValue(rpcSession.daemonInstanceIdAtom);
   const workbench = useBunja(workbenchBunja);
   const tabState = useBunja(workbenchTabBunja);
   const explorer = useBunja(explorerBunja, [
     ExplorerPaneScope.bind(tabState.tabId),
   ]);
   const openedFile = useAtomValue(explorer.openedFileAtom);
-  const lastConnectionEpochRef = useRef(connectionEpoch);
+  const lastDaemonInstanceIdRef = useRef(daemonInstanceId);
   const [entryMenu, setEntryMenu] = useState<EntryMenuState>();
   const [folderMenu, setFolderMenu] = useState<FolderMenuState>();
   const [propertiesEntry, setPropertiesEntry] = useState<FsEntry>();
@@ -133,10 +133,11 @@ export function FilesTool() {
   const terminalShells = useAtomValue(filesTool.terminalShellsAtom);
 
   useEffect(() => {
-    if (lastConnectionEpochRef.current === connectionEpoch) return;
-    lastConnectionEpochRef.current = connectionEpoch;
+    if (lastDaemonInstanceIdRef.current === daemonInstanceId) return;
+    lastDaemonInstanceIdRef.current = daemonInstanceId;
+    if (!daemonInstanceId) return;
     explorer.refresh();
-  }, [connectionEpoch, explorer]);
+  }, [daemonInstanceId, explorer]);
 
   useEffect(() => {
     if (!entryMenu && !folderMenu) return;
@@ -276,11 +277,11 @@ export function FilesTool() {
       current ? { ...current, error: undefined, isDeleting: true } : current
     );
     try {
+      const transport = await rpcSession.webTransport();
       const result = await deletePaths(
-        machine,
+        transport,
         [deleteEntry.entry.path],
         DeleteMode.Trash,
-        machineStore.rpcCallOptions(rpcSession.rpcCallOptions()),
       );
       const failure = result.results.find((item) => !item.ok);
       if (failure && !failure.ok) {

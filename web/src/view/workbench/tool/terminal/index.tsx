@@ -113,7 +113,7 @@ export function TerminalTool() {
   const tabState = useBunja(workbenchTabBunja);
   const machine = useAtomValue(machineStore.selectedAtom);
   const isPaired = useAtomValue(machineStore.selectedIsPairedAtom);
-  const connectionEpoch = useAtomValue(rpcSession.connectionEpochAtom);
+  const daemonInstanceId = useAtomValue(rpcSession.daemonInstanceIdAtom);
   const tab = useAtomValue(tabState.tabAtom);
   const active = useAtomValue(tabState.activeAtom);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -222,7 +222,7 @@ export function TerminalTool() {
   }, []);
 
   useEffect(() => {
-    if (!terminalReady || !machine || !isPaired) {
+    if (!terminalReady || !machine || !isPaired || !daemonInstanceId) {
       stopCurrentAttach();
       terminalSessionIdRef.current = undefined;
       attachIdRef.current = undefined;
@@ -246,7 +246,7 @@ export function TerminalTool() {
     machine?.clientId,
     machine?.clientSecret,
     isPaired,
-    connectionEpoch,
+    daemonInstanceId,
     tab?.id,
   ]);
 
@@ -292,8 +292,9 @@ export function TerminalTool() {
 
       fitTerminal();
       const size = terminalSize(runtime.terminal);
+      const transport = await rpcSession.webTransport();
       const session = await createTerminalSession(
-        currentMachine,
+        transport,
         {
           cols: size.cols,
           cwd: options.cwd,
@@ -301,13 +302,11 @@ export function TerminalTool() {
           launch: options.launch,
           title: options.title,
         },
-        machineStore.rpcCallOptions(rpcSession.rpcCallOptions()),
       );
       if (generationRef.current !== generation) {
         void closeTerminalSession(
-          currentMachine,
+          transport,
           session.terminalSessionId,
-          machineStore.rpcCallOptions(rpcSession.rpcCallOptions()),
         ).catch(() => {});
         return;
       }
@@ -344,20 +343,23 @@ export function TerminalTool() {
       ? terminalSize(runtime.terminal)
       : sessionInfo ?? terminalDimensions;
     let cancelled = false;
-    const iterator = attachTerminalSession(
-      currentMachine,
+    let iterator: AsyncGenerator<TerminalEvent> | undefined;
+    stopAttachRef.current = () => {
+      cancelled = true;
+      void iterator?.return(undefined);
+    };
+
+    const transport = await rpcSession.webTransport();
+    if (cancelled) return;
+    iterator = attachTerminalSession(
+      transport,
       {
         terminalSessionId,
         afterSeq: latestSeqRef.current,
         viewportCols: size.cols,
         viewportRows: size.rows,
       },
-      machineStore.rpcCallOptions(rpcSession.rpcCallOptions()),
     );
-    stopAttachRef.current = () => {
-      cancelled = true;
-      void iterator.return(undefined);
-    };
 
     for await (const event of iterator) {
       if (cancelled || generationRef.current !== generation) return;
@@ -467,11 +469,10 @@ export function TerminalTool() {
           !attachId
         ) return;
         await writeTerminalInput(
-          currentMachine,
+          await rpcSession.webTransport(),
           terminalSessionId,
           attachId,
           bytes,
-          machineStore.rpcCallOptions(rpcSession.rpcCallOptions()),
         );
       })
       .catch((err) => {
@@ -499,14 +500,13 @@ export function TerminalTool() {
 
     try {
       const response = await takeTerminalControl(
-        currentMachine,
+        await rpcSession.webTransport(),
         {
           terminalSessionId,
           attachId,
           viewportCols: size.cols,
           viewportRows: size.rows,
         },
-        machineStore.rpcCallOptions(rpcSession.rpcCallOptions()),
       );
       setStatus({
         phase: "attached",
