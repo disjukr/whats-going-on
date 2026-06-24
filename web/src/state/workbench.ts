@@ -606,6 +606,9 @@ export const workbenchTabBunja = bunja(() => {
     get(pane.paneAtom)?.tabs.find((tab) => tab.id === tabId) ?? undefined
   );
   const activeAtom = atom((get) => get(pane.paneAtom)?.activeTabId === tabId);
+  const focusedAtom = atom((get) =>
+    get(pane.activeAtom) && get(pane.paneAtom)?.activeTabId === tabId
+  );
   const showCloseAtom = atom((get) => {
     const paneValue = get(pane.paneAtom);
     return (paneValue?.tabs.length ?? 0) > 1 || get(pane.paneCountAtom) > 1;
@@ -638,6 +641,7 @@ export const workbenchTabBunja = bunja(() => {
     tabId,
     tabAtom,
     activeAtom,
+    focusedAtom,
     showCloseAtom,
     selectTab,
     setDaemonClientDetailId,

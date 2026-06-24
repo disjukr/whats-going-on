@@ -116,7 +116,7 @@ export function TerminalTool() {
   const isPaired = useAtomValue(machineStore.selectedIsPairedAtom);
   const daemonInstanceId = useAtomValue(rpcSession.daemonInstanceIdAtom);
   const tab = useAtomValue(tabState.tabAtom);
-  const active = useAtomValue(tabState.activeAtom);
+  const focused = useAtomValue(tabState.focusedAtom);
   const hostRef = useRef<HTMLDivElement>(null);
   const machineRef = useRef<Machine | undefined>(undefined);
   const activeRef = useRef(false);
@@ -153,14 +153,14 @@ export function TerminalTool() {
   }, [machine]);
 
   useLayoutEffect(() => {
-    activeRef.current = active;
-  }, [active]);
+    activeRef.current = focused;
+  }, [focused]);
 
   useEffect(() => {
-    if (!active) return;
+    if (!focused) return;
     fitTerminal();
     void takeCurrentControl();
-  }, [active]);
+  }, [focused]);
 
   useEffect(() => {
     if (!sessionInfo) {
