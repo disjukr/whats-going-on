@@ -15,6 +15,7 @@ import {
 import { closeTerminalSession } from "../../../protocol/rpc.ts";
 import { machineStoreBunja } from "../../../state/machine-store.ts";
 import { rpcSessionBunja } from "../../../state/rpc-session.ts";
+import { terminalShellsBunja } from "../../../state/terminal-shells.ts";
 import {
   type TabDropPosition,
   workbenchBunja,
@@ -49,8 +50,8 @@ const workbenchPaneClassName = [
   "w-full h-full min-w-0 min-h-0 overflow-hidden bg-white",
 ].join(" ");
 const workbenchPaneHeadClassName = [
-  "grid [grid-template-columns:0.8em_minmax(0,1fr)_auto]",
-  "items-center h-[1.6em] min-h-[1.6em] box-border leading-[1.6]",
+  "grid [grid-template-columns:1em_minmax(0,1fr)_auto]",
+  "items-center h-[2em] min-h-[2em] box-border leading-[1.6]",
   "border-b border-b-[#d8dde7] bg-[#f6f8fb]",
 ].join(" ");
 const paneHandleClassName =
@@ -61,17 +62,16 @@ const workbenchTabsClassName = [
 ].join(" ");
 const paneActionsClassName = "flex items-center";
 const paneActionButtonGroupClassName =
-  "inline-flex h-[1.6rem] items-center box-border p-[2px]";
+  "inline-flex h-[2rem] items-center box-border p-[2px]";
 const paneOverflowMenuWrapClassName = "relative flex h-full";
 const compactIconButtonClassName =
-  "!w-[1.6em] !min-w-[1.6em] !h-full !min-h-0 !box-border !p-0";
+  "!w-[2em] !min-w-[2em] !h-full !min-h-0 !box-border !p-0";
 const buttonGroupFirstClassName = "!rounded-l-[4px] !rounded-r-0";
 const buttonGroupLastClassName = "-ml-px !rounded-l-0 !rounded-r-[4px]";
 const standaloneButtonClassName = "!rounded-[4px]";
-const paneOverflowMenuClassName =
-  "top-[calc(100%+5px)] right-0 z-[12] w-[172px]";
+const paneOverflowMenuClassName = "top-full right-0 z-[12] w-[172px]";
 const paneOverflowMenuSectionClassName = "border-t border-t-[#e4e8ef]";
-const paneOverflowMenuItemClassName = "font-650";
+const paneOverflowMenuItemClassName = "";
 const workbenchPaneBodyClassName = [
   "workbench-pane-body relative w-full h-full min-w-0 min-h-0 overflow-visible",
   "before:content-[''] before:absolute before:z-[4]",
@@ -108,9 +108,12 @@ export function WorkbenchPaneView(
 ) {
   const machineStore = useBunja(machineStoreBunja);
   const rpcSession = useBunja(rpcSessionBunja);
+  const terminalShellsState = useBunja(terminalShellsBunja);
   const workbench = useBunja(workbenchBunja);
   const paneState = useBunja(workbenchPaneBunja);
   const machine = useAtomValue(machineStore.selectedAtom);
+  const defaultShell = useAtomValue(terminalShellsState.defaultShellAtom);
+  const terminalShells = useAtomValue(terminalShellsState.terminalShellsAtom);
   const panes = useAtomValue(workbench.panesAtom);
   const pane = useAtomValue(paneState.paneAtom);
   const paneCount = useAtomValue(paneState.paneCountAtom);
@@ -218,7 +221,18 @@ export function WorkbenchPaneView(
   }
 
   function openTerminalTab() {
-    paneState.addTerminalTab();
+    const shell = defaultShell;
+    paneState.addTerminalTab(
+      shell
+        ? {
+          launch: {
+            command: shell.command,
+            args: shell.args,
+          },
+          title: shell.name,
+        }
+        : {},
+    );
     setPaneOverflowMenuOpen(false);
   }
 

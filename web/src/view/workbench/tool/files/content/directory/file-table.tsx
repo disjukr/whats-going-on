@@ -25,17 +25,17 @@ const fileTableClassName = [
   "file-table grid",
   "[grid-template-columns:minmax(220px,1fr)_minmax(96px,130px)_minmax(88px,120px)_minmax(140px,190px)]",
   "[@container_workbench-tab-page_(max-width:680px)]:[grid-template-columns:minmax(200px,1fr)_96px_88px]",
-  "auto-rows-[1.6em] min-w-0 min-h-0 overflow-auto bg-white leading-[1.6]",
+  "auto-rows-[2em] min-w-0 min-h-0 overflow-auto bg-white leading-[1.6]",
 ].join(" ");
 const hideInNarrowContainerClassName =
   "[@container_workbench-tab-page_(max-width:680px)]:hidden";
 const fileHeadClassName = [
-  "file-head sticky top-0 z-[1] flex items-center h-[1.6rem] box-border",
-  "border-b border-b-[#d8dde7] bg-[#f6f8fb] text-[#667085] text-[0.8rem] font-700 px-[8px]",
+  "file-head sticky top-0 z-[1] flex items-center h-[2rem] box-border",
+  "border-b border-b-[#d8dde7] bg-[#f6f8fb] text-[#667085] font-700 px-[8px]",
 ].join(" ");
 const fileRowClassName = [
   "grid [grid-column:1/-1] [grid-template-columns:subgrid]",
-  "h-[1.6em] min-h-[1.6em] box-border border-0 border-b border-b-[#eef1f5] rounded-0",
+  "h-[2em] min-h-[2em] box-border border-0 border-b border-b-[#eef1f5] rounded-0",
   "appearance-none cursor-pointer bg-white p-0 text-left leading-[1.6] [font-family:inherit] hover:bg-[#f7faff]",
   "[&.selected]:bg-[#eaf3ff]",
 ].join(" ");
@@ -53,7 +53,7 @@ const readonlyClassName = [
 ].join(" ");
 const tableEmptyClassName =
   "[grid-column:1/-1] flex items-center text-[#667085] px-[12px]";
-const tableBottomPaddingClassName = "[grid-column:1/-1] h-[8rem]";
+const tableBottomPaddingClassName = "[grid-column:1/-1] h-[10rem]";
 
 export function FileTable(
   {

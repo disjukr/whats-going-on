@@ -4,7 +4,7 @@ import type { ConnectionState } from "../../state/types.ts";
 import { className } from "../class-name.ts";
 
 const connectionPillClassName = [
-  "inline-flex appearance-none justify-self-end items-center gap-[4px] h-[1.6em] min-h-[1.6em]",
+  "inline-flex appearance-none justify-self-end items-center gap-[4px] h-[2em] min-h-[2em]",
   "border border-[#444b5c] rounded-full bg-transparent text-[#cbd3df]",
   "box-border cursor-pointer px-[6px] font-700 leading-[1.6] whitespace-nowrap [font-family:inherit]",
   "hover:border-[#566074] hover:bg-[#343946] hover:text-white",
@@ -28,7 +28,7 @@ const connectionDotClassName = [
 const connectionRefreshClassName = [
   "connection-refresh absolute opacity-0 [transition:opacity_0.12s_ease]",
 ].join(" ");
-const connectionLabelClassName = "text-[0.8rem] leading-[1.6]";
+const connectionLabelClassName = "leading-[1.6]";
 
 interface ConnectionPillProps {
   machine?: Machine;

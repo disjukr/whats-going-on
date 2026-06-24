@@ -181,8 +181,12 @@ export const workbenchBunja = bunja(() => {
     addToolTab(paneId, "daemon");
   }
 
-  function addTerminalTab(paneId: string) {
-    addToolTab(paneId, "terminal");
+  function addTerminalTab(
+    paneId: string,
+    config: WorkbenchTerminalTabConfig = {},
+  ) {
+    const tab = createTerminalTab(config);
+    store.set(stateAtom, (current) => openTabInPane(current, paneId, tab));
   }
 
   function openTerminalTab(config: WorkbenchTerminalTabConfig = {}) {
@@ -304,22 +308,7 @@ export const workbenchBunja = bunja(() => {
 
   function addToolTab(paneId: string, tool: WorkbenchTool) {
     const tab = createWorkbenchTab(tool);
-    store.set(
-      stateAtom,
-      (current) => ({
-        ...current,
-        activePaneId: paneId,
-        panes: current.panes.map((pane) =>
-          pane.id === paneId
-            ? {
-              ...pane,
-              tabs: [...pane.tabs, tab],
-              activeTabId: tab.id,
-            }
-            : pane
-        ),
-      }),
-    );
+    store.set(stateAtom, (current) => openTabInPane(current, paneId, tab));
   }
 
   function selectTab(paneId: string, tabId: string) {
@@ -509,8 +498,8 @@ export const workbenchPaneBunja = bunja(() => {
     workbench.addDaemonTab(paneId);
   }
 
-  function addTerminalTab() {
-    workbench.addTerminalTab(paneId);
+  function addTerminalTab(config: WorkbenchTerminalTabConfig = {}) {
+    workbench.addTerminalTab(paneId, config);
   }
 
   function removePane() {
@@ -780,12 +769,19 @@ function openTabInActivePane(
 ): WorkbenchState {
   const activePaneId = activePaneFromState(state)?.id;
   if (!activePaneId) return state;
+  return openTabInPane(state, activePaneId, tab);
+}
 
+function openTabInPane(
+  state: WorkbenchState,
+  paneId: string,
+  tab: WorkbenchTab,
+): WorkbenchState {
   return {
     ...state,
-    activePaneId,
+    activePaneId: paneId,
     panes: state.panes.map((pane) =>
-      pane.id === activePaneId
+      pane.id === paneId
         ? {
           ...pane,
           tabs: [...pane.tabs, tab],

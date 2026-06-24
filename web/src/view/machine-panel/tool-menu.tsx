@@ -1,4 +1,9 @@
-import { type MouseEvent as ReactMouseEvent, useRef, useState } from "react";
+import {
+  type MouseEvent as ReactMouseEvent,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { Activity, ChevronDown, Folder, Info, Terminal } from "lucide-react";
 import type { AvailableShellInfo } from "../../protocol/rpc.ts";
 import type { WorkbenchTool } from "../../state/workbench.ts";
@@ -42,7 +47,7 @@ const tools: {
 
 const SHELL_MENU_WIDTH = 260;
 const SHELL_MENU_MAX_HEIGHT = 360;
-const SHELL_MENU_TRIGGER_GAP = 5;
+const SHELL_MENU_TRIGGER_GAP = 0;
 
 const toolMenuClassName =
   "grid content-start gap-0 min-h-0 overflow-visible px-[8px] py-[12px]";
@@ -59,7 +64,7 @@ const toolItemClassName = [
   "[&.active]:bg-[#eef3fb] [&.active]:text-[#20242d]",
   "disabled:opacity-56",
   "[&_span]:min-w-0 [&_span]:overflow-hidden [&_span]:text-ellipsis",
-  "[&_span]:whitespace-nowrap [&_span]:text-[0.8rem] [&_span]:font-700",
+  "[&_span]:whitespace-nowrap [&_span]:font-700",
 ].join(" ");
 const terminalMainButtonClassName = [
   toolItemClassName,
@@ -74,7 +79,6 @@ const terminalDropdownButtonClassName = [
 ].join(" ");
 const shellMenuItemClassName = [
   "!grid min-w-0 grid-cols-[minmax(0,1fr)_auto] !gap-[8px]",
-  "font-650",
 ].join(" ");
 const shellMenuDefaultItemClassName = "bg-[#eef3fb]";
 const shellMenuItemLabelClassName =
@@ -100,6 +104,7 @@ interface ToolMenuProps {
 export function ToolMenu(
   { activeTool, terminalShells, onOpenTerminalShell, onSelect }: ToolMenuProps,
 ) {
+  const hasTerminalShells = terminalShells.length > 0;
   const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [shellMenuPosition, setShellMenuPosition] = useState<
     FloatingMenuPosition | undefined
@@ -109,12 +114,17 @@ export function ToolMenu(
     closeOnScroll: true,
   });
 
+  useEffect(() => {
+    if (!hasTerminalShells) closeShellMenu();
+  }, [hasTerminalShells]);
+
   function closeShellMenu() {
     setShellMenuOpen(false);
     setShellMenuPosition(undefined);
   }
 
   function toggleShellMenu(event: ReactMouseEvent<HTMLButtonElement>) {
+    if (!hasTerminalShells) return;
     if (shellMenuOpen) {
       closeShellMenu();
       return;
@@ -145,13 +155,17 @@ export function ToolMenu(
           ? (
             <div
               key={id}
-              className={toolItemRowClassName}
+              className={hasTerminalShells
+                ? toolItemRowClassName
+                : toolItemFrameClassName}
               ref={shellMenuRef}
             >
               <button
                 type="button"
                 className={className(
-                  terminalMainButtonClassName,
+                  hasTerminalShells
+                    ? terminalMainButtonClassName
+                    : toolItemClassName,
                   activeTool === id && "active",
                 )}
                 onClick={() => {
@@ -163,22 +177,26 @@ export function ToolMenu(
                 <Icon size={17} />
                 <span>{label}</span>
               </button>
-              <button
-                type="button"
-                className={className(
-                  terminalDropdownButtonClassName,
-                  (activeTool === id || shellMenuOpen) && "active",
-                )}
-                onClick={toggleShellMenu}
-                disabled={disabled}
-                aria-label="Open terminal shell menu"
-                aria-haspopup="menu"
-                aria-expanded={shellMenuOpen}
-                title="Open terminal shell"
-              >
-                <ChevronDown size={14} />
-              </button>
-              {shellMenuOpen
+              {hasTerminalShells
+                ? (
+                  <button
+                    type="button"
+                    className={className(
+                      terminalDropdownButtonClassName,
+                      (activeTool === id || shellMenuOpen) && "active",
+                    )}
+                    onClick={toggleShellMenu}
+                    disabled={disabled}
+                    aria-label="Open terminal shell menu"
+                    aria-haspopup="menu"
+                    aria-expanded={shellMenuOpen}
+                    title="Open terminal shell"
+                  >
+                    <ChevronDown size={14} />
+                  </button>
+                )
+                : null}
+              {hasTerminalShells && shellMenuOpen
                 ? (
                   <FloatingMenu
                     className="z-[80] w-[260px] overflow-x-hidden overflow-y-auto"

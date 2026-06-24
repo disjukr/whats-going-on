@@ -56,7 +56,7 @@ const workbenchTabClassName = [
   "[&>button]:min-w-0 [&>button]:h-full [&>button]:min-h-0",
   "[&>button]:cursor-pointer [&>button]:border-0 [&>button]:rounded-0 [&>button]:bg-transparent",
   "[&>button]:px-[6px] [&>button]:text-[#344054]",
-  "[&>button]:text-[0.8rem] [&>button]:font-700",
+  "[&>button]:font-700",
   "[&>button:hover]:bg-transparent",
   "[&>button[role='tab']]:justify-start",
   "[&>button[role='tab']]:flex-[1_1_auto]",
@@ -67,8 +67,8 @@ const workbenchTabClassName = [
   "[&>button[role='tab']]:cursor-grab",
   "[&>button[role='tab']:active]:cursor-grabbing",
   "[&.active>button]:text-[#20242d]",
-  "[&_.tab-close]:flex-[0_0_auto] [&_.tab-close]:w-[1.6em]",
-  "[&_.tab-close]:min-w-[1.6em] [&_.tab-close]:p-0 [&_.tab-close]:text-[#667085]",
+  "[&_.tab-close]:flex-[0_0_auto] [&_.tab-close]:w-[2em]",
+  "[&_.tab-close]:min-w-[2em] [&_.tab-close]:p-0 [&_.tab-close]:text-[#667085]",
 ].join(" ");
 const workbenchTabIconClassName = "mr-[5px] flex-[0_0_auto] text-[#667085]";
 const workbenchTabTitleClassName =

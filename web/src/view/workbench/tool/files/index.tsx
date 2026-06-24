@@ -11,13 +11,10 @@ import {
   X,
 } from "lucide-react";
 import {
-  type AvailableShellInfo,
-  type AvailableShellsTableEvent,
   DeleteMode,
   deletePaths,
   FsEntry,
   FsEntryKind,
-  subscribeAvailableShells,
 } from "../../../../protocol/rpc.ts";
 import {
   displayName,
@@ -45,6 +42,7 @@ import {
   FloatingMenu,
   FloatingMenuItem,
 } from "../../../ui/floating-menu.tsx";
+import { filesToolBunja } from "./state.ts";
 
 const emptyWorkspaceClassName = [
   "grid content-center justify-items-center w-full h-full gap-[10px]",
@@ -116,6 +114,7 @@ export function FilesTool() {
   const machineModal = useBunja(machineModalBunja);
   const machineStore = useBunja(machineStoreBunja);
   const rpcSession = useBunja(rpcSessionBunja);
+  const filesTool = useBunja(filesToolBunja);
   const machine = useAtomValue(machineStore.selectedAtom);
   const isPaired = useAtomValue(machineStore.selectedIsPairedAtom);
   const connectionEpoch = useAtomValue(rpcSession.connectionEpochAtom);
@@ -130,9 +129,8 @@ export function FilesTool() {
   const [folderMenu, setFolderMenu] = useState<FolderMenuState>();
   const [propertiesEntry, setPropertiesEntry] = useState<FsEntry>();
   const [deleteEntry, setDeleteEntry] = useState<DeleteEntryState>();
-  const [terminalShells, setTerminalShells] = useState<AvailableShellInfo[]>(
-    [],
-  );
+  const defaultShell = useAtomValue(filesTool.defaultShellAtom);
+  const terminalShells = useAtomValue(filesTool.terminalShellsAtom);
 
   useEffect(() => {
     if (lastConnectionEpochRef.current === connectionEpoch) return;
@@ -159,40 +157,6 @@ export function FilesTool() {
       globalThis.removeEventListener("keydown", closeMenuOnEscape);
     };
   }, [entryMenu, folderMenu]);
-
-  useEffect(() => {
-    if (!machine || !isPaired) {
-      setTerminalShells([]);
-      return;
-    }
-
-    let cancelled = false;
-    const iterator = subscribeAvailableShells(
-      machine,
-      machineStore.rpcCallOptions(rpcSession.rpcCallOptions()),
-    );
-    void (async () => {
-      try {
-        for await (const event of iterator) {
-          if (cancelled) return;
-          if (event.type === "snapshot") {
-            setTerminalShells(event.rows);
-          } else {
-            setTerminalShells((current) =>
-              applyAvailableShellPatch(current, event)
-            );
-          }
-        }
-      } catch {
-        if (!cancelled) setTerminalShells([]);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      void iterator.return(undefined);
-    };
-  }, [connectionEpoch, isPaired, machine, machineStore, rpcSession]);
 
   useEffect(() => {
     if (!propertiesEntry) return;
@@ -294,8 +258,7 @@ export function FilesTool() {
   function openTerminalHere() {
     setFolderMenu(undefined);
     if (!currentPath) return;
-    const shell = terminalShells.find((item) => item.isDefault) ??
-      terminalShells[0];
+    const shell = defaultShell;
     if (!shell) return;
     workbench.openTerminalTab({
       cwd: currentPath,
@@ -479,19 +442,6 @@ function folderContextMenuPosition(
     width: entryContextMenuWidth,
   });
   return { x: position.left, y: position.top };
-}
-
-function applyAvailableShellPatch(
-  current: AvailableShellInfo[],
-  event: Extract<AvailableShellsTableEvent, { type: "patch" }>,
-): AvailableShellInfo[] {
-  const removeIds = new Set(event.removes.map((item) => item.shellId));
-  const retained = current.filter((shell) => !removeIds.has(shell.shellId));
-  const upserts = new Map(event.upserts.map((shell) => [shell.shellId, shell]));
-  return [
-    ...retained.filter((shell) => !upserts.has(shell.shellId)),
-    ...event.upserts,
-  ];
 }
 
 function DeleteEntryModal(

@@ -39,9 +39,9 @@ const emptyWorkspaceClassName = [
   "[&_h2]:m-0 [&_h2]:text-[#303642] [&_h2]:text-[18px] [&_h2]:tracking-[0]",
 ].join(" ");
 const terminalFooterClassName = [
-  "flex items-center justify-end gap-[12px] h-[1.6rem] min-h-[1.6rem] box-border",
+  "flex items-center justify-end gap-[12px] h-[2rem] min-h-[2rem] box-border",
   "border-t border-t-[#d8dde7] bg-[#fbfcfe] text-[#667085]",
-  "px-[8px] text-[0.8rem] leading-[1.6]",
+  "px-[8px] leading-[1.6]",
   "[@container_workbench-tab-page_(min-width:520px)]:justify-between",
 ].join(" ");
 const terminalFooterDetailsClassName = [
@@ -64,14 +64,14 @@ const terminalOverlayNoticeClassName = [
   "[&_p]:m-0 [&_p]:text-[13px] [&_p]:leading-[1.45]",
 ].join(" ");
 const terminalStatusNoticeClassName = [
-  "flex min-h-[1.6rem] items-center gap-[8px] border-t border-t-[#263244]",
-  "bg-[#0f1520] px-[8px] text-[0.8rem] leading-[1.6] text-[#98a2b3]",
+  "flex min-h-[2rem] items-center gap-[8px] border-t border-t-[#263244]",
+  "bg-[#0f1520] px-[8px] leading-[1.6] text-[#98a2b3]",
   "[&_strong]:flex-[0_0_auto] [&_strong]:font-650 [&_strong]:text-[#d0d5dd]",
   "[&_span]:min-w-0 [&_span]:flex-[1_1_auto] [&_span]:overflow-hidden",
   "[&_span]:text-ellipsis [&_span]:whitespace-nowrap",
 ].join(" ");
 const terminalNoticeButtonClassName =
-  "!h-[1.2rem] !min-h-[1.2rem] !rounded-[4px] !border-[#38465a] !bg-[#111827] !px-[6px] !text-[0.8rem] !leading-none !text-[#d0d5dd] hover:!bg-[#172033]";
+  "!h-[1.5rem] !min-h-[1.5rem] !rounded-[4px] !border-[#38465a] !bg-[#111827] !px-[6px] !leading-none !text-[#d0d5dd] hover:!bg-[#172033]";
 
 interface TerminalRuntime {
   terminal: XTerm;

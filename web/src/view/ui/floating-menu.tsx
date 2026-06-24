@@ -9,13 +9,13 @@ import { className as joinClassName } from "../class-name.ts";
 
 const menuClassName = [
   "grid gap-[2px] border border-[#d8dde7] bg-white",
-  "rounded-[4px] p-0 text-[0.8rem]",
+  "rounded-[4px] p-0",
   "[box-shadow:0_18px_48px_rgb(32_36_45_/_24%)]",
 ].join(" ");
 const fixedMenuClassName = "fixed";
 const absoluteMenuClassName = "absolute";
 const menuItemClassName = [
-  "inline-flex h-[1.6rem] min-h-[1.6rem] w-full appearance-none",
+  "inline-flex h-[2rem] min-h-[2rem] w-full appearance-none",
   "items-center justify-start gap-[7px] rounded-0 border-0 bg-transparent",
   "px-[8px] text-left text-[#20242d] [font:inherit]",
   "cursor-pointer hover:bg-[#f2f6ff]",
@@ -129,7 +129,7 @@ export function clampFloatingMenuPosition(
 export function rightAlignedFloatingMenuPosition(
   rect: DOMRect,
   { itemCount, width }: FloatingMenuSize,
-  gap = 5,
+  gap = 0,
 ): FloatingMenuPosition {
   return clampFloatingMenuPosition(
     rect.right - width,
@@ -146,7 +146,7 @@ export function floatingMenuPositionFromRect(
     minHeight = 120,
     width,
   }: FloatingMenuSize & { maxHeight?: number; minHeight?: number },
-  gap = 5,
+  gap = 0,
 ): FloatingMenuPosition {
   const estimatedHeight = Math.min(maxHeight, floatingMenuHeight(itemCount));
   const left = clampViewportPosition(
