@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useAtomValue } from "jotai";
 import { useBunja } from "bunja/react";
 import { FitAddon } from "@xterm/addon-fit";
@@ -77,6 +77,7 @@ interface TerminalRuntime {
   terminal: XTerm;
   fitAddon: FitAddon;
   inputDisposable: { dispose: () => void };
+  replayQueryDisposables: Array<{ dispose: () => void }>;
   resizeObserver: ResizeObserver;
 }
 
@@ -122,10 +123,15 @@ export function TerminalTool() {
   const runtimeRef = useRef<TerminalRuntime | undefined>(undefined);
   const terminalSessionIdRef = useRef<string | undefined>(undefined);
   const attachIdRef = useRef<string | undefined>(undefined);
+  const primaryAttachIdRef = useRef<string | undefined>(undefined);
   const latestSeqRef = useRef<number | undefined>(undefined);
   const stopAttachRef = useRef<(() => void) | undefined>(undefined);
   const generationRef = useRef(0);
   const inputQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const takeControlPromiseRef = useRef<Promise<void> | undefined>(undefined);
+  const replayOutputUntilSeqRef = useRef<number | undefined>(undefined);
+  const suppressReplayGeneratedInputRef = useRef(false);
+  const replayWriteDepthRef = useRef(0);
   const persistedSessionSnapshotKeyRef = useRef<string | undefined>(undefined);
   const terminalSessionFinishedRef = useRef(false);
   const lastSizeRef = useRef<{ cols: number; rows: number } | undefined>(
@@ -146,8 +152,11 @@ export function TerminalTool() {
     machineRef.current = machine;
   }, [machine]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     activeRef.current = active;
+  }, [active]);
+
+  useEffect(() => {
     if (!active) return;
     fitTerminal();
     void takeCurrentControl();
@@ -195,9 +204,12 @@ export function TerminalTool() {
     lastSizeRef.current = size;
     setTerminalDimensions(size);
 
-    const inputDisposable = terminal.onData((data) => {
-      queueTerminalInput(data);
-    });
+    const inputDisposable = terminal.onData((data) => queueTerminalInput(data));
+    const replayQueryDisposables = installReplayQueryHandlers(
+      terminal,
+      () => replayWriteDepthRef.current > 0,
+    );
+    installTerminalClipboardShortcuts(terminal);
     const resizeObserver = new ResizeObserver(() => {
       fitTerminal();
       void takeCurrentControl();
@@ -207,6 +219,7 @@ export function TerminalTool() {
       terminal,
       fitAddon,
       inputDisposable,
+      replayQueryDisposables,
       resizeObserver,
     };
     setTerminalReady(true);
@@ -215,6 +228,7 @@ export function TerminalTool() {
       setTerminalReady(false);
       stopCurrentAttach();
       inputDisposable.dispose();
+      for (const disposable of replayQueryDisposables) disposable.dispose();
       resizeObserver.disconnect();
       terminal.dispose();
       runtimeRef.current = undefined;
@@ -226,6 +240,11 @@ export function TerminalTool() {
       stopCurrentAttach();
       terminalSessionIdRef.current = undefined;
       attachIdRef.current = undefined;
+      primaryAttachIdRef.current = undefined;
+      takeControlPromiseRef.current = undefined;
+      replayOutputUntilSeqRef.current = undefined;
+      suppressReplayGeneratedInputRef.current = false;
+      replayWriteDepthRef.current = 0;
       latestSeqRef.current = undefined;
       setSessionInfo(undefined);
       setStatus({ phase: "idle", message: "Terminal idle" });
@@ -260,6 +279,12 @@ export function TerminalTool() {
     stopCurrentAttach();
     terminalSessionIdRef.current = undefined;
     attachIdRef.current = undefined;
+    primaryAttachIdRef.current = undefined;
+    takeControlPromiseRef.current = undefined;
+    replayOutputUntilSeqRef.current = undefined;
+    suppressReplayGeneratedInputRef.current = options.existingSessionId !==
+      undefined;
+    replayWriteDepthRef.current = 0;
     latestSeqRef.current = undefined;
     terminalSessionFinishedRef.current = false;
     persistedSessionSnapshotKeyRef.current = undefined;
@@ -381,6 +406,11 @@ export function TerminalTool() {
     switch (event.type) {
       case "attached":
         attachIdRef.current = event.attachId;
+        primaryAttachIdRef.current = event.primaryAttachId;
+        replayOutputUntilSeqRef.current =
+          suppressReplayGeneratedInputRef.current
+            ? event.session.latestOutputSeq
+            : undefined;
         setSessionInfo(event.session);
         if (event.session.exit) {
           terminalSessionFinishedRef.current = true;
@@ -402,7 +432,13 @@ export function TerminalTool() {
         return;
       case "outputChunk":
         latestSeqRef.current = event.seq;
-        runtimeRef.current?.terminal.write(event.bytes);
+        writeTerminalOutput(event.bytes, isSuppressibleReplayOutput(event.seq));
+        if (
+          replayOutputUntilSeqRef.current !== undefined &&
+          event.seq >= replayOutputUntilSeqRef.current
+        ) {
+          replayOutputUntilSeqRef.current = undefined;
+        }
         return;
       case "historyGap":
         setStatus({
@@ -411,6 +447,7 @@ export function TerminalTool() {
         });
         return;
       case "controlChanged":
+        primaryAttachIdRef.current = event.primaryAttachId;
         setStatus({
           phase: event.primaryAttachId === attachIdRef.current
             ? "attached"
@@ -434,6 +471,11 @@ export function TerminalTool() {
         return;
       case "sessionClosed":
         terminalSessionFinishedRef.current = true;
+        primaryAttachIdRef.current = undefined;
+        takeControlPromiseRef.current = undefined;
+        replayOutputUntilSeqRef.current = undefined;
+        suppressReplayGeneratedInputRef.current = false;
+        replayWriteDepthRef.current = 0;
         clearTerminalSessionReference();
         setStatus({
           phase: "closed",
@@ -460,13 +502,18 @@ export function TerminalTool() {
       .catch(() => {})
       .then(async () => {
         const currentMachine = machineRef.current;
-        const terminalSessionId = terminalSessionIdRef.current;
-        const attachId = attachIdRef.current;
         if (
           terminalSessionFinishedRef.current ||
           !currentMachine ||
+          !terminalSessionIdRef.current
+        ) return;
+        if (!(await ensureCurrentControl())) return;
+        const terminalSessionId = terminalSessionIdRef.current;
+        const attachId = attachIdRef.current;
+        if (
           !terminalSessionId ||
-          !attachId
+          !attachId ||
+          primaryAttachIdRef.current !== attachId
         ) return;
         await writeTerminalInput(
           await rpcSession.webTransport(),
@@ -476,8 +523,57 @@ export function TerminalTool() {
         );
       })
       .catch((err) => {
+        if (isStalePrimaryAttachError(err)) return;
         setStatus({ phase: "error", message: errorMessage(err) });
       });
+  }
+
+  function isSuppressibleReplayOutput(seq: number) {
+    return replayOutputUntilSeqRef.current !== undefined &&
+      seq <= replayOutputUntilSeqRef.current;
+  }
+
+  function writeTerminalOutput(
+    bytes: Uint8Array,
+    suppressGeneratedInput: boolean,
+  ) {
+    const terminal = runtimeRef.current?.terminal;
+    if (!terminal) return;
+    if (!suppressGeneratedInput) {
+      terminal.write(bytes);
+      return;
+    }
+
+    replayWriteDepthRef.current += 1;
+    try {
+      terminal.write(bytes, () => {
+        replayWriteDepthRef.current = Math.max(
+          0,
+          replayWriteDepthRef.current - 1,
+        );
+      });
+    } catch (err) {
+      replayWriteDepthRef.current = Math.max(
+        0,
+        replayWriteDepthRef.current - 1,
+      );
+      throw err;
+    }
+  }
+
+  function isLivePrimaryAttach() {
+    const attachId = attachIdRef.current;
+    return attachId !== undefined && primaryAttachIdRef.current === attachId;
+  }
+
+  async function ensureCurrentControl() {
+    if (isLivePrimaryAttach()) return true;
+    if (terminalSessionFinishedRef.current || !activeRef.current) return false;
+    takeControlPromiseRef.current ??= takeCurrentControl().finally(() => {
+      takeControlPromiseRef.current = undefined;
+    });
+    await takeControlPromiseRef.current;
+    return isLivePrimaryAttach();
   }
 
   async function takeCurrentControl() {
@@ -508,6 +604,7 @@ export function TerminalTool() {
           viewportRows: size.rows,
         },
       );
+      primaryAttachIdRef.current = response.primaryAttachId;
       setStatus({
         phase: "attached",
         message: previous?.cols !== size.cols || previous?.rows !== size.rows
@@ -548,6 +645,11 @@ export function TerminalTool() {
   function clearTerminalSessionReference() {
     terminalSessionIdRef.current = undefined;
     attachIdRef.current = undefined;
+    primaryAttachIdRef.current = undefined;
+    takeControlPromiseRef.current = undefined;
+    replayOutputUntilSeqRef.current = undefined;
+    suppressReplayGeneratedInputRef.current = false;
+    replayWriteDepthRef.current = 0;
     latestSeqRef.current = undefined;
     tabState.setTerminalSessionId(undefined);
   }
@@ -737,6 +839,72 @@ function commandName(command: string): string {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function isStalePrimaryAttachError(err: unknown): boolean {
+  return err instanceof RpcError && err.code === "NotPrimaryAttach";
+}
+
+function installTerminalClipboardShortcuts(terminal: XTerm) {
+  terminal.attachCustomKeyEventHandler((event) => {
+    if (event.type !== "keydown") return true;
+    const modifierPressed = event.ctrlKey || event.metaKey;
+    if (!modifierPressed || event.altKey) return true;
+
+    const key = event.key.toLowerCase();
+    if (key === "c" && terminal.hasSelection()) {
+      event.preventDefault();
+      void copyTerminalSelection(terminal).catch(() => {});
+      return false;
+    }
+    if (key === "v") {
+      event.preventDefault();
+      void pasteClipboardToTerminal(terminal).catch(() => {});
+      return false;
+    }
+    return true;
+  });
+}
+
+async function copyTerminalSelection(terminal: XTerm) {
+  const selection = terminal.getSelection();
+  if (!selection) return;
+  await navigator.clipboard.writeText(selection);
+}
+
+async function pasteClipboardToTerminal(terminal: XTerm) {
+  const text = await navigator.clipboard.readText();
+  if (!text) return;
+  terminal.paste(text);
+}
+
+function installReplayQueryHandlers(
+  terminal: XTerm,
+  shouldSuppress: () => boolean,
+): Array<{ dispose: () => void }> {
+  const consumeReplayQuery = () => shouldSuppress();
+  return [
+    terminal.parser.registerCsiHandler(
+      { final: "n" },
+      consumeReplayQuery,
+    ),
+    terminal.parser.registerCsiHandler(
+      { prefix: "?", final: "n" },
+      consumeReplayQuery,
+    ),
+    terminal.parser.registerCsiHandler(
+      { final: "c" },
+      consumeReplayQuery,
+    ),
+    terminal.parser.registerCsiHandler(
+      { prefix: ">", final: "c" },
+      consumeReplayQuery,
+    ),
+    terminal.parser.registerCsiHandler(
+      { prefix: "=", final: "c" },
+      consumeReplayQuery,
+    ),
+  ];
 }
 
 function isTerminalSessionNotFoundError(err: unknown): boolean {
