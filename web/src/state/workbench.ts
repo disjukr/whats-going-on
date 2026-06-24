@@ -27,6 +27,7 @@ export interface WorkbenchTab {
 export interface WorkbenchTerminalTabConfig {
   cwd?: string;
   launch?: TerminalLaunchSpec;
+  terminalSessionId?: string;
   terminalTitle?: string;
   title?: string;
 }
@@ -705,6 +706,7 @@ function createTerminalTab(config: WorkbenchTerminalTabConfig): WorkbenchTab {
     terminalLastKnownCwd: config.cwd,
     terminalLastKnownTitle: config.terminalTitle ?? config.title,
     terminalLaunch: config.launch,
+    terminalSessionId: config.terminalSessionId,
   };
 }
 

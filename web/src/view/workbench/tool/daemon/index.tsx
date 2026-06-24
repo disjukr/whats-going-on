@@ -8,6 +8,7 @@ import {
   ChevronRight,
   Info,
   Loader2,
+  SquareTerminal,
   WifiOff,
 } from "lucide-react";
 import {
@@ -23,7 +24,10 @@ import {
 import { machineStoreBunja } from "../../../../state/machine-store.ts";
 import { rpcSessionBunja } from "../../../../state/rpc-session.ts";
 import type { ConnectionState } from "../../../../state/types.ts";
-import { workbenchTabBunja } from "../../../../state/workbench.ts";
+import {
+  workbenchBunja,
+  workbenchTabBunja,
+} from "../../../../state/workbench.ts";
 import { Button } from "../../../ui/button.tsx";
 
 const procNames = new Map<number, string>([
@@ -82,15 +86,23 @@ const daemonBreadcrumbClassName = [
 ].join(" ");
 const daemonBreadcrumbMutedClassName = "text-[#667085]";
 const summaryGridClassName = [
-  "grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-[1px] overflow-hidden",
+  "grid grid-cols-1 gap-[1px] overflow-hidden",
+  "@[640px]:grid-cols-2 @[960px]:grid-cols-3",
   "border border-[#d8dde7] rounded-[8px] bg-[#d8dde7]",
 ].join(" ");
 const summaryItemClassName = [
-  "grid min-w-0 gap-[6px] bg-[#fbfcfe] px-[14px] py-[12px]",
+  "grid min-w-0 gap-[8px] bg-[#fbfcfe] px-[16px] py-[14px]",
   "[&_dt]:m-0 [&_dt]:text-[12px] [&_dt]:font-700 [&_dt]:text-[#667085]",
-  "[&_dd]:m-0 [&_dd]:min-w-0 [&_dd]:text-[14px] [&_dd]:font-700",
+  "[&_dd]:m-0 [&_dd]:min-w-0 [&_dd]:text-[14px]",
   "[&_dd]:text-[#20242d] [&_dd]:[overflow-wrap:anywhere]",
 ].join(" ");
+const infoValueClassName = [
+  "inline-block max-w-full rounded-[4px] border border-[#d8dde7]",
+  "bg-[#f4f6fa] px-[4px] py-[1px] font-mono text-[0.92em]",
+  "leading-[1.4] text-[#20242d] [overflow-wrap:anywhere]",
+].join(" ");
+const summaryValueWithNoteClassName = "grid justify-items-start gap-[7px]";
+const summaryNoteClassName = "text-[12px] text-[#667085]";
 const procSectionClassName = "mt-[18px] min-w-0";
 const procSectionTitleClassName =
   "mb-[8px] text-[12px] font-800 uppercase text-[#667085]";
@@ -142,6 +154,10 @@ const currentClientBadgeClassName = [
   "flex-[0_0_auto] rounded-[999px] bg-[#dff6e7] px-[6px] py-[1px]",
   "text-[10px] not-italic font-800 text-[#027a48]",
 ].join(" ");
+const clientInfoCurrentClientBadgeClassName = [
+  "flex-[0_0_auto] rounded-[999px] bg-[#dff6e7] px-[6px] py-[1px]",
+  "text-[10px] not-italic text-[#027a48]",
+].join(" ");
 const clientDetailPageClassName = "grid min-w-0 gap-[14px]";
 const clientDetailSectionClassName = [
   "min-w-0 overflow-hidden rounded-[8px] border border-[#d8dde7] bg-white",
@@ -162,16 +178,17 @@ const clientInfoGridClassName = [
 const clientInfoItemClassName = [
   "grid min-w-0 gap-[5px] bg-white px-[12px] py-[10px]",
   "[&_dt]:m-0 [&_dt]:text-[12px] [&_dt]:font-700 [&_dt]:text-[#667085]",
-  "[&_dd]:m-0 [&_dd]:min-w-0 [&_dd]:text-[13px] [&_dd]:font-650",
+  "[&_dd]:m-0 [&_dd]:min-w-0 [&_dd]:text-[13px]",
   "[&_dd]:text-[#20242d] [&_dd]:[overflow-wrap:anywhere]",
 ].join(" ");
 const clientIdValueClassName = "flex min-w-0 flex-wrap items-center gap-[7px]";
 const credentialExpiryValueClassName = "grid justify-items-start gap-[7px]";
-const credentialExpiryRemainingClassName =
-  "text-[12px] font-650 text-[#667085]";
+const credentialExpiryRemainingClassName = "text-[12px] text-[#667085]";
+const credentialCreatedValueClassName = credentialExpiryValueClassName;
+const credentialCreatedAgeClassName = credentialExpiryRemainingClassName;
 const renewCredentialButtonClassName = "!min-h-[28px] !px-[9px] !text-[12px]";
-const renewCredentialMessageClassName = "text-[12px] font-650 text-[#667085]";
-const renewCredentialErrorClassName = "text-[12px] font-650 text-[#b42318]";
+const renewCredentialMessageClassName = "text-[12px] text-[#667085]";
+const renewCredentialErrorClassName = "text-[12px] text-[#b42318]";
 const terminalSessionListClassName = [
   "grid min-w-0",
   "[&_article]:grid [&_article]:min-w-0",
@@ -187,6 +204,8 @@ const terminalSessionListClassName = [
   "[&_small]:col-span-3 [&_small]:min-w-0 [&_small]:[overflow-wrap:anywhere]",
   "[&_small]:text-[12px] [&_small]:text-[#667085]",
 ].join(" ");
+const terminalSessionActionsClassName =
+  "flex min-w-0 items-center justify-end gap-[6px]";
 const terminalSessionCloseButtonClassName =
   "!min-h-[28px] !px-[9px] !text-[12px]";
 const clientDetailStateClassName =
@@ -226,6 +245,7 @@ export function DaemonTool() {
   const machines = useBunja(machineStoreBunja);
   const rpcSession = useBunja(rpcSessionBunja);
   const tabState = useBunja(workbenchTabBunja);
+  const workbench = useBunja(workbenchBunja);
   const daemonInfo = useAtomValue(rpcSession.daemonInfoAtom);
   const daemonServerTimeMs = useAtomValue(rpcSession.daemonServerTimeMsAtom);
   const daemonUptimeSeconds = useAtomValue(
@@ -418,6 +438,16 @@ export function DaemonTool() {
     );
   }
 
+  function openTerminalSession(session: TerminalSessionInfo) {
+    workbench.openTerminalTab({
+      cwd: session.lastKnownCwd,
+      launch: session.launch,
+      terminalSessionId: session.terminalSessionId,
+      terminalTitle: session.lastKnownTitle,
+      title: terminalSessionTabTitle(session),
+    });
+  }
+
   return (
     <section className={daemonToolClassName}>
       <div className={daemonHeaderClassName}>
@@ -461,6 +491,7 @@ export function DaemonTool() {
             onOpenClient={openClientDetail}
             onOpenClients={openClientsPage}
             onCloseTerminalSession={closeSelectedTerminalSession}
+            onOpenTerminalSession={openTerminalSession}
             onRenewCurrentClientCredential={renewSelectedClientCredential}
           />
         )
@@ -587,6 +618,7 @@ interface DaemonInfoViewProps {
   instanceId: string;
   onCloseTerminalSession: (terminalSessionId: string) => Promise<void>;
   onOpenClient: (clientId: string) => void;
+  onOpenTerminalSession: (session: TerminalSessionInfo) => void;
   os: string;
   onRenewCurrentClientCredential: () => Promise<void>;
   serverTimeMs?: number;
@@ -608,6 +640,7 @@ function DaemonInfoView(
     instanceId,
     onCloseTerminalSession,
     onOpenClient,
+    onOpenTerminalSession,
     onRenewCurrentClientCredential,
     os,
     serverTimeMs,
@@ -629,6 +662,7 @@ function DaemonInfoView(
         currentClientId={currentClientId}
         onRenewCurrentClientCredential={onRenewCurrentClientCredential}
         onCloseTerminalSession={onCloseTerminalSession}
+        onOpenTerminalSession={onOpenTerminalSession}
         sessions={terminalSessionsState.sessions.filter((session) =>
           session.creatorClientId === clientDetail.clientId
         )}
@@ -658,31 +692,49 @@ function DaemonInfoView(
       <dl className={summaryGridClassName}>
         <div className={summaryItemClassName}>
           <dt>Endpoint</dt>
-          <dd>{endpoint ?? "Unknown"}</dd>
+          <dd>
+            <code className={infoValueClassName}>{endpoint ?? "Unknown"}</code>
+          </dd>
         </div>
         <div className={summaryItemClassName}>
           <dt>Daemon version</dt>
-          <dd>{version}</dd>
+          <dd>
+            <code className={infoValueClassName}>{version}</code>
+          </dd>
         </div>
         <div className={summaryItemClassName}>
           <dt>Machine OS</dt>
-          <dd>{os}</dd>
+          <dd>
+            <code className={infoValueClassName}>{os}</code>
+          </dd>
         </div>
         <div className={summaryItemClassName}>
-          <dt>Daemon instance</dt>
-          <dd>{instanceId}</dd>
+          <dt>Daemon instance ID</dt>
+          <dd className={summaryValueWithNoteClassName}>
+            <code className={infoValueClassName}>{instanceId}</code>
+            <span className={summaryNoteClassName}>
+              Changes every time the daemon starts.
+            </span>
+          </dd>
         </div>
         <div className={summaryItemClassName}>
           <dt>Daemon time</dt>
-          <dd>{formatDaemonTimestamp(serverTimeMs)}</dd>
+          <dd>
+            <code className={infoValueClassName}>
+              {formatDaemonTimestamp(serverTimeMs)}
+            </code>
+          </dd>
         </div>
         <div className={summaryItemClassName}>
           <dt>Daemon started</dt>
-          <dd>{formatDaemonTimestamp(startedAtMs)}</dd>
-        </div>
-        <div className={summaryItemClassName}>
-          <dt>Daemon uptime</dt>
-          <dd>{formatDaemonUptime(uptimeSeconds)}</dd>
+          <dd className={summaryValueWithNoteClassName}>
+            <code className={infoValueClassName}>
+              {formatDaemonTimestamp(startedAtMs)}
+            </code>
+            <span className={summaryNoteClassName}>
+              Uptime {formatDaemonUptime(uptimeSeconds)}
+            </span>
+          </dd>
         </div>
       </dl>
 
@@ -904,6 +956,7 @@ interface ClientDetailPageProps {
   client: ClientInfo;
   currentClientId?: string;
   onCloseTerminalSession: (terminalSessionId: string) => Promise<void>;
+  onOpenTerminalSession: (session: TerminalSessionInfo) => void;
   onRenewCurrentClientCredential: () => Promise<void>;
   sessions: TerminalSessionInfo[];
   state: TerminalSessionsState;
@@ -914,6 +967,7 @@ function ClientDetailPage(
     client,
     currentClientId,
     onCloseTerminalSession,
+    onOpenTerminalSession,
     onRenewCurrentClientCredential,
     sessions,
     state,
@@ -928,6 +982,7 @@ function ClientDetailPage(
       />
       <ClientTerminalSessions
         onCloseTerminalSession={onCloseTerminalSession}
+        onOpenTerminalSession={onOpenTerminalSession}
         sessions={sessions}
         state={state}
       />
@@ -976,25 +1031,42 @@ function ClientInformationSection(
       <dl className={clientInfoGridClassName}>
         <div className={clientInfoItemClassName}>
           <dt>Label</dt>
-          <dd>{client.label || "Unnamed client"}</dd>
+          <dd>
+            <code className={infoValueClassName}>
+              {client.label || "Unnamed client"}
+            </code>
+          </dd>
         </div>
         <div className={clientInfoItemClassName}>
           <dt>Client ID</dt>
           <dd className={clientIdValueClassName}>
-            <span>{client.clientId}</span>
+            <code className={infoValueClassName}>{client.clientId}</code>
             {isCurrent
-              ? <em className={currentClientBadgeClassName}>This client</em>
+              ? (
+                <em className={clientInfoCurrentClientBadgeClassName}>
+                  This client
+                </em>
+              )
               : null}
           </dd>
         </div>
         <div className={clientInfoItemClassName}>
           <dt>Credential created</dt>
-          <dd>{formatUnixTimestamp(client.createdAtUnix)}</dd>
+          <dd className={credentialCreatedValueClassName}>
+            <code className={infoValueClassName}>
+              {formatUnixTimestamp(client.createdAtUnix)}
+            </code>
+            <span className={credentialCreatedAgeClassName}>
+              {formatCredentialCreatedAge(client.createdAtUnix, nowMs)}
+            </span>
+          </dd>
         </div>
         <div className={clientInfoItemClassName}>
           <dt>Credential expires</dt>
           <dd className={credentialExpiryValueClassName}>
-            <span>{formatUnixTimestamp(client.expiresAtUnix)}</span>
+            <code className={infoValueClassName}>
+              {formatUnixTimestamp(client.expiresAtUnix)}
+            </code>
             <span className={credentialExpiryRemainingClassName}>
               {formatCredentialExpiryRemaining(client.expiresAtUnix, nowMs)}
             </span>
@@ -1034,6 +1106,7 @@ function ClientInformationSection(
 
 interface ClientTerminalSessionsProps {
   onCloseTerminalSession: (terminalSessionId: string) => Promise<void>;
+  onOpenTerminalSession: (session: TerminalSessionInfo) => void;
   sessions: TerminalSessionInfo[];
   state: TerminalSessionsState;
 }
@@ -1041,6 +1114,7 @@ interface ClientTerminalSessionsProps {
 function ClientTerminalSessions(
   {
     onCloseTerminalSession,
+    onOpenTerminalSession,
     sessions,
     state,
   }: ClientTerminalSessionsProps,
@@ -1088,15 +1162,24 @@ function ClientTerminalSessions(
               <article key={session.terminalSessionId}>
                 <strong>{commandName(session.launch.command)}</strong>
                 <span>{session.cols} x {session.rows}</span>
-                <Button
-                  className={terminalSessionCloseButtonClassName}
-                  disabled={closingSessionIds.has(session.terminalSessionId)}
-                  onClick={() => closeSession(session.terminalSessionId)}
-                >
-                  {closingSessionIds.has(session.terminalSessionId)
-                    ? "Closing"
-                    : "Close"}
-                </Button>
+                <div className={terminalSessionActionsClassName}>
+                  <Button
+                    className={terminalSessionCloseButtonClassName}
+                    onClick={() => onOpenTerminalSession(session)}
+                  >
+                    <SquareTerminal size={13} />
+                    Open
+                  </Button>
+                  <Button
+                    className={terminalSessionCloseButtonClassName}
+                    disabled={closingSessionIds.has(session.terminalSessionId)}
+                    onClick={() => closeSession(session.terminalSessionId)}
+                  >
+                    {closingSessionIds.has(session.terminalSessionId)
+                      ? "Closing"
+                      : "Close"}
+                  </Button>
+                </div>
                 <small>
                   {terminalSessionStatus(session)}
                   {" - "}
@@ -1125,6 +1208,10 @@ function terminalSessionStatus(session: TerminalSessionInfo): string {
   if (session.exit?.signal) return `Exited after ${session.exit.signal}`;
   if (session.exit) return "Exited";
   return "Running";
+}
+
+function terminalSessionTabTitle(session: TerminalSessionInfo): string {
+  return session.lastKnownTitle ?? commandName(session.launch.command);
 }
 
 interface InlineStateProps {
@@ -1177,6 +1264,21 @@ function formatCredentialExpiryRemaining(
   }
   if (remainingSeconds === 0) return "Expires now";
   return `Expired ${formatDurationSeconds(-remainingSeconds)} ago`;
+}
+
+function formatCredentialCreatedAge(
+  createdAtUnix: number | undefined,
+  nowMs: number,
+): string {
+  if (createdAtUnix === undefined || createdAtUnix === 0) {
+    return "Creation time unknown";
+  }
+  const elapsedSeconds = Math.floor(nowMs / 1000 - createdAtUnix);
+  if (elapsedSeconds > 0) {
+    return `${formatDurationSeconds(elapsedSeconds)} ago`;
+  }
+  if (elapsedSeconds === 0) return "Now";
+  return `In ${formatDurationSeconds(-elapsedSeconds)}`;
 }
 
 function formatDurationSeconds(totalSeconds: number): string {
