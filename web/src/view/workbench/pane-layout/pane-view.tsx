@@ -4,12 +4,14 @@ import { useBunja } from "bunja/react";
 import { Handle, useLayout } from "panecake";
 import {
   Columns2,
+  Copy,
   Folder,
   GripVertical,
   Info,
   MoreHorizontal,
   Rows2,
   Terminal,
+  Unlink,
   X,
 } from "lucide-react";
 import { closeTerminalSession } from "../../../protocol/rpc.ts";
@@ -35,6 +37,7 @@ import { WorkbenchTabItem } from "./tab-item.tsx";
 import { className } from "../../class-name.ts";
 import { Button } from "../../ui/button.tsx";
 import {
+  clampFloatingMenuPosition,
   FloatingMenu,
   FloatingMenuItem,
   useFloatingMenuDismiss,
@@ -48,6 +51,12 @@ interface WorkbenchPaneViewProps {
 type PendingCloseRequest =
   | { dirtyCount: number; kind: "pane" }
   | { dirtyCount: number; kind: "tab"; tabId: string };
+
+interface TabContextMenuState {
+  tab: WorkbenchTab;
+  x: number;
+  y: number;
+}
 
 const workbenchPaneClassName = [
   "workbench-pane relative grid [grid-template-rows:auto_minmax(0,1fr)]",
@@ -74,6 +83,7 @@ const buttonGroupFirstClassName = "!rounded-l-[4px] !rounded-r-0";
 const buttonGroupLastClassName = "-ml-px !rounded-l-0 !rounded-r-[4px]";
 const standaloneButtonClassName = "!rounded-[4px]";
 const paneOverflowMenuClassName = "top-full right-0 z-[12] w-[172px]";
+const tabContextMenuWidth = 168;
 const paneOverflowMenuSectionClassName = "border-t border-t-[#e4e8ef]";
 const paneOverflowMenuItemClassName = "";
 const workbenchPaneBodyClassName = [
@@ -151,11 +161,13 @@ export function WorkbenchPaneView(
   const [pendingCloseRequest, setPendingCloseRequest] = useState<
     PendingCloseRequest | undefined
   >();
+  const [tabContextMenu, setTabContextMenu] = useState<TabContextMenuState>();
   const [tabDropTarget, setTabDropTarget] = useState<WorkbenchTabDropTarget>();
   const [tabSplitDropSide, setTabSplitDropSide] = useState<
     TabSplitDropSide | undefined
   >();
   const paneOverflowMenuRef = useRef<HTMLDivElement>(null);
+  const tabContextMenuRef = useRef<HTMLDivElement>(null);
   const canClosePane = paneCount > 1;
   const hasTabDragState = draggingTabId !== undefined ||
     tabDropTarget !== undefined ||
@@ -165,6 +177,11 @@ export function WorkbenchPaneView(
     paneOverflowMenuOpen,
     paneOverflowMenuRef,
     () => setPaneOverflowMenuOpen(false),
+  );
+  useFloatingMenuDismiss(
+    tabContextMenu !== undefined,
+    tabContextMenuRef,
+    () => setTabContextMenu(undefined),
   );
 
   useEffect(() => {
@@ -220,6 +237,7 @@ export function WorkbenchPaneView(
   }
 
   function requestCloseWorkbenchTab(tabId: string) {
+    setTabContextMenu(undefined);
     if (!pane) return;
     const closingTab = pane.tabs.find((tab) => tab.id === tabId);
     const dirtyCount = closingTab?.dirty ? 1 : 0;
@@ -239,6 +257,43 @@ export function WorkbenchPaneView(
       return;
     }
     performClosePane();
+  }
+
+  function detachTerminalTab(tabId: string) {
+    setTabContextMenu(undefined);
+    if (!pane) return;
+    if (pane.tabs.length > 1) {
+      paneState.closeTab(tabId);
+      return;
+    }
+    if (canClosePane) {
+      removeLayoutPane(nodeId);
+      paneState.removePane();
+      return;
+    }
+    paneState.addFilesTab();
+    paneState.closeTab(tabId);
+  }
+
+  function duplicateWorkbenchTab(tabId: string) {
+    setTabContextMenu(undefined);
+    paneState.duplicateTab(tabId);
+  }
+
+  function openTabContextMenu(
+    tab: WorkbenchTab,
+    event: React.MouseEvent<HTMLDivElement>,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    paneState.selectTab(tab.id);
+    const position = tabContextMenuPosition(
+      event.clientX,
+      event.clientY,
+      tab.tool === "terminal",
+    );
+    setPaneOverflowMenuOpen(false);
+    setTabContextMenu({ tab, ...position });
   }
 
   function confirmPendingCloseRequest() {
@@ -462,6 +517,7 @@ export function WorkbenchPaneView(
                 paneActive={active}
                 onClose={() =>
                   requestCloseWorkbenchTab(tab.id)}
+                onContextMenu={openTabContextMenu}
                 onDragStart={() =>
                   setDraggingTabId(tab.id)}
                 onDragEnd={() => {
@@ -588,6 +644,39 @@ export function WorkbenchPaneView(
         ))}
         {active ? <div className={activePaneOutlineClassName} /> : null}
       </div>
+      {tabContextMenu
+        ? (
+          <FloatingMenu
+            className="z-[30] w-[168px]"
+            menuRef={tabContextMenuRef}
+            position={{ left: tabContextMenu.x, top: tabContextMenu.y }}
+          >
+            <FloatingMenuItem
+              onClick={() => duplicateWorkbenchTab(tabContextMenu.tab.id)}
+            >
+              <Copy size={14} />
+              Duplicate
+            </FloatingMenuItem>
+            {tabContextMenu.tab.tool === "terminal"
+              ? (
+                <FloatingMenuItem
+                  onClick={() => detachTerminalTab(tabContextMenu.tab.id)}
+                >
+                  <Unlink size={14} />
+                  Detach
+                </FloatingMenuItem>
+              )
+              : null}
+            <FloatingMenuItem
+              danger={Boolean(tabContextMenu.tab.dirty)}
+              onClick={() => requestCloseWorkbenchTab(tabContextMenu.tab.id)}
+            >
+              <X size={14} />
+              Close
+            </FloatingMenuItem>
+          </FloatingMenu>
+        )
+        : null}
       {pendingCloseRequest
         ? (
           <UnsavedCloseConfirmModal
@@ -616,6 +705,18 @@ function tabSplitSideFromEvent(
   if (nearest === right) return "right";
   if (nearest === top) return "top";
   return "bottom";
+}
+
+function tabContextMenuPosition(
+  x: number,
+  y: number,
+  terminal: boolean,
+): { x: number; y: number } {
+  const position = clampFloatingMenuPosition(x, y, {
+    itemCount: terminal ? 3 : 2,
+    width: tabContextMenuWidth,
+  });
+  return { x: position.left, y: position.top };
 }
 
 function dirtyTabCount(tabs: WorkbenchTab[]): number {

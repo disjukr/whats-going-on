@@ -27,6 +27,10 @@ interface WorkbenchTabItemProps {
   nodeId: string;
   paneActive: boolean;
   onClose: () => void;
+  onContextMenu: (
+    tab: WorkbenchTab,
+    event: React.MouseEvent<HTMLDivElement>,
+  ) => void;
   onDragStart: () => void;
   onDragEnd: () => void;
   onDragOverTab: (tabId: string, position: TabDropPosition) => void;
@@ -89,6 +93,7 @@ export function WorkbenchTabItem(
     nodeId,
     paneActive,
     onClose,
+    onContextMenu,
     onDragStart,
     onDragEnd,
     onDragOverTab,
@@ -140,6 +145,7 @@ export function WorkbenchTabItem(
   return (
     <div
       className={tabClassName}
+      onContextMenu={(event) => onContextMenu(tab, event)}
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >

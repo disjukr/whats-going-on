@@ -336,6 +336,34 @@ export const workbenchBunja = bunja(() => {
     return tab.id;
   }
 
+  function duplicateTab(paneId: string, tabId: string): string | undefined {
+    const sourcePane = store.get(stateAtom).panes.find((pane) =>
+      pane.id === paneId
+    );
+    const sourceTab = sourcePane?.tabs.find((tab) => tab.id === tabId);
+    if (!sourcePane || !sourceTab) return undefined;
+
+    const tab = cloneWorkbenchTab(sourceTab);
+    copyTabState(machineId, sourceTab, tab);
+    store.set(
+      stateAtom,
+      (current) => ({
+        ...current,
+        activePaneId: paneId,
+        panes: current.panes.map((pane) =>
+          pane.id === paneId
+            ? {
+              ...pane,
+              activeTabId: tab.id,
+              tabs: insertTab(pane.tabs, tab, tabId, "after"),
+            }
+            : pane
+        ),
+      }),
+    );
+    return tab.id;
+  }
+
   function selectTab(paneId: string, tabId: string) {
     store.set(
       stateAtom,
@@ -487,6 +515,7 @@ export const workbenchBunja = bunja(() => {
     addFilesTab,
     addTerminalTab,
     openTerminalTab,
+    duplicateTab,
     selectTab,
     closeTab,
     moveTab,
@@ -542,6 +571,10 @@ export const workbenchPaneBunja = bunja(() => {
 
   function closeTab(tabId: string) {
     workbench.closeTab(paneId, tabId);
+  }
+
+  function duplicateTab(tabId: string): string | undefined {
+    return workbench.duplicateTab(paneId, tabId);
   }
 
   function moveTab(
@@ -615,6 +648,7 @@ export const workbenchPaneBunja = bunja(() => {
     focusPane,
     selectTab,
     closeTab,
+    duplicateTab,
     moveTab,
     moveTabToNewPane,
     setDaemonClientDetailId,
