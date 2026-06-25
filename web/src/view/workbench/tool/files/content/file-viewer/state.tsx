@@ -4,7 +4,7 @@ import { createScopeFromContext } from "bunja/react";
 import { atom } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import { JotaiStoreScope } from "unsaturated/store";
-import { FsEntry } from "../../../../../../protocol/rpc.ts";
+import { FsEntry, FsEntryKind } from "../../../../../../protocol/rpc.ts";
 import { fileViewerSelectedImplStorageKey } from "../../../../../../state/file-viewer.ts";
 import { machineBunja } from "../../../../../../state/machine-store.ts";
 import { rpcSessionBunja } from "../../../../../../state/rpc-session.ts";
@@ -17,13 +17,15 @@ type FileViewerState =
   | { phase: "ready"; initialBytes: Uint8Array; impl: FileViewerImplId };
 
 export const FsEntryContext = createContext<FsEntry | undefined>(undefined);
-const FsEntryScope = createScopeFromContext(FsEntryContext);
+export const FsEntryPathContext = createContext<string | undefined>(undefined);
+const FsEntryPathScope = createScopeFromContext(FsEntryPathContext);
 
 export const fileViewerBunja = bunja(() => {
   const machine = bunja.use(machineBunja);
   const rpcSession = bunja.use(rpcSessionBunja);
   const tabId = requireWorkbenchTabId(bunja.use(WorkbenchTabIdScope));
-  const fsEntry = requireFsEntry(bunja.use(FsEntryScope));
+  const fsEntryPath = requireFsEntryPath(bunja.use(FsEntryPathScope));
+  const fsEntry = fsEntryFromPath(fsEntryPath);
   const store = bunja.use(JotaiStoreScope);
 
   const stateAtom = atom<FileViewerState>({ phase: "detecting" });
@@ -93,12 +95,31 @@ export const fileViewerBunja = bunja(() => {
   };
 });
 
-function requireFsEntry(fsEntry: FsEntry | undefined): FsEntry {
+export function requireFsEntry(fsEntry: FsEntry | undefined): FsEntry {
   if (!fsEntry) throw new Error("FsEntry context is not provided.");
   return fsEntry;
+}
+
+function requireFsEntryPath(path: string | undefined): string {
+  if (!path) throw new Error("FsEntry path context is not provided.");
+  return path;
 }
 
 function requireWorkbenchTabId(tabId: string | undefined): string {
   if (!tabId) throw new Error("Workbench tab id context is not provided.");
   return tabId;
+}
+
+function fsEntryFromPath(path: string): FsEntry {
+  return {
+    kind: FsEntryKind.File,
+    name: fileBasename(path),
+    path,
+    readonly: false,
+  };
+}
+
+function fileBasename(path: string): string {
+  const slashIndex = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return path.slice(slashIndex + 1) || path;
 }

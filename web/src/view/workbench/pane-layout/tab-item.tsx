@@ -98,6 +98,7 @@ export function WorkbenchTabItem(
   const tabState = useBunja(workbenchTabBunja);
   const tab = useAtomValue(tabState.tabAtom);
   const active = useAtomValue(tabState.activeAtom);
+  const dirty = useAtomValue(tabState.dirtyAtom);
   const showClose = useAtomValue(tabState.showCloseAtom);
   const label = useWorkbenchTabLabel(tabState.tabId, tab);
   const tabClassName = className(
@@ -178,10 +179,19 @@ export function WorkbenchTabItem(
             draggable={false}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={onClose}
-            title="Close tab"
-            aria-label={`Close ${label}`}
+            title={dirty ? "Unsaved changes" : "Close tab"}
+            aria-label={dirty
+              ? `Close ${label} with unsaved changes`
+              : `Close ${label}`}
           >
-            <X size={11} className="translate-x-[-1px]" />
+            {dirty
+              ? (
+                <span
+                  className="block size-[6px] rounded-full bg-[#667085]"
+                  aria-hidden="true"
+                />
+              )
+              : <X size={11} />}
           </button>
         )
         : null}

@@ -2,6 +2,8 @@ import { useEffect, useRef } from "react";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 
 interface MonacoTextViewerProps {
+  onChange: (text: string) => void;
+  onSave: (text: string) => void;
   path: string;
   text: string;
 }
@@ -50,12 +52,24 @@ monacoHost.MonacoEnvironment ??= {
   },
 };
 
-export function MonacoTextViewer({ path, text }: MonacoTextViewerProps) {
+export function MonacoTextViewer(
+  { onChange, onSave, path, text }: MonacoTextViewerProps,
+) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const onChangeRef = useRef(onChange);
+  const onSaveRef = useRef(onSave);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | undefined>(
     undefined,
   );
   const modelRef = useRef<monaco.editor.ITextModel | undefined>(undefined);
+
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
+
+  useEffect(() => {
+    onSaveRef.current = onSave;
+  }, [onSave]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -65,24 +79,34 @@ export function MonacoTextViewer({ path, text }: MonacoTextViewerProps) {
     const editor = monaco.editor.create(host, {
       automaticLayout: true,
       contextmenu: true,
-      domReadOnly: true,
       fontFamily:
         'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
       fontSize: 12,
       lineHeight: 19,
       minimap: { enabled: false },
       model,
-      readOnly: true,
       renderLineHighlight: "none",
       scrollBeyondLastLine: false,
       smoothScrolling: true,
       stickyScroll: { enabled: false },
       wordWrap: "off",
     });
+    const changeDisposable = model.onDidChangeContent(() => {
+      onChangeRef.current(model.getValue());
+    });
+    const saveDisposable = editor.onKeyDown((event) => {
+      const keyS = event.browserEvent.key.toLowerCase() === "s";
+      if (!keyS || !(event.ctrlKey || event.metaKey)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onSaveRef.current(model.getValue());
+    });
     editorRef.current = editor;
     modelRef.current = model;
 
     return () => {
+      changeDisposable.dispose();
+      saveDisposable.dispose();
       editor.dispose();
       model.dispose();
       editorRef.current = undefined;

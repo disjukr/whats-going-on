@@ -45,6 +45,10 @@ interface WorkbenchPaneViewProps {
   topRight: boolean;
 }
 
+type PendingCloseRequest =
+  | { dirtyCount: number; kind: "pane" }
+  | { dirtyCount: number; kind: "tab"; tabId: string };
+
 const workbenchPaneClassName = [
   "workbench-pane relative grid [grid-template-rows:auto_minmax(0,1fr)]",
   "w-full h-full min-w-0 min-h-0 overflow-hidden bg-white",
@@ -99,6 +103,29 @@ const activePaneOutlineClassName = [
   "pointer-events-none absolute top-[-2px] right-0 bottom-0 left-0 z-[6]",
   "[box-shadow:inset_0_0_0_2px_#7f9abf]",
 ].join(" ");
+const closeConfirmBackdropClassName =
+  "fixed inset-0 z-[20] grid place-items-center bg-[rgb(32_36_45_/_42%)] p-[24px]";
+const closeConfirmModalClassName = [
+  "w-[min(420px,100%)] overflow-hidden border border-[#d8dde7]",
+  "rounded-[8px] bg-white [box-shadow:0_24px_72px_rgb(32_36_45_/_28%)]",
+].join(" ");
+const closeConfirmHeadClassName = [
+  "flex items-center justify-between gap-[12px] border-b border-b-[#e4e8ef]",
+  "px-[16px] py-[14px]",
+  "[&_div]:grid [&_div]:gap-[2px] [&_div]:min-w-0",
+  "[&_span]:text-[#667085] [&_span]:text-[12px] [&_span]:font-700",
+  "[&_h2]:m-0 [&_h2]:text-[#20242d] [&_h2]:text-[18px] [&_h2]:tracking-[0]",
+].join(" ");
+const closeConfirmIconButtonClassName = "!w-[36px] !min-w-[36px] !p-0";
+const closeConfirmBodyClassName = [
+  "grid gap-[14px] p-[16px]",
+  "[&_p]:m-0 [&_p]:text-[#475467] [&_p]:text-[13px]",
+].join(" ");
+const closeConfirmActionsClassName = "flex justify-end gap-[8px]";
+const closeConfirmDangerButtonClassName = [
+  "border-[#f6c2bd] bg-[#fff4f2] text-[#b42318]",
+  "hover:border-[#f04438] hover:bg-[#fff2f0] hover:text-[#912018]",
+].join(" ");
 
 export function WorkbenchPaneView(
   {
@@ -121,6 +148,9 @@ export function WorkbenchPaneView(
   const { removePane: removeLayoutPane, split } = useLayout();
   const [paneOverflowMenuOpen, setPaneOverflowMenuOpen] = useState(false);
   const [draggingTabId, setDraggingTabId] = useState<string>();
+  const [pendingCloseRequest, setPendingCloseRequest] = useState<
+    PendingCloseRequest | undefined
+  >();
   const [tabDropTarget, setTabDropTarget] = useState<WorkbenchTabDropTarget>();
   const [tabSplitDropSide, setTabSplitDropSide] = useState<
     TabSplitDropSide | undefined
@@ -160,7 +190,28 @@ export function WorkbenchPaneView(
     split(nodeId, direction, newPaneId, "after");
   }
 
-  function closePane() {
+  useEffect(() => {
+    if (!pendingCloseRequest) return;
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setPendingCloseRequest(undefined);
+    }
+
+    globalThis.addEventListener("keydown", closeOnEscape);
+    return () => globalThis.removeEventListener("keydown", closeOnEscape);
+  }, [pendingCloseRequest]);
+
+  function requestClosePane() {
+    if (!canClosePane) return;
+    const dirtyCount = pane ? dirtyTabCount(pane.tabs) : 0;
+    if (dirtyCount > 0) {
+      setPendingCloseRequest({ dirtyCount, kind: "pane" });
+      return;
+    }
+    performClosePane();
+  }
+
+  function performClosePane() {
     if (!canClosePane) return;
     setPaneOverflowMenuOpen(false);
     if (pane) closeTerminalSessions(pane.tabs);
@@ -168,7 +219,18 @@ export function WorkbenchPaneView(
     paneState.removePane();
   }
 
-  function closeWorkbenchTab(tabId: string) {
+  function requestCloseWorkbenchTab(tabId: string) {
+    if (!pane) return;
+    const closingTab = pane.tabs.find((tab) => tab.id === tabId);
+    const dirtyCount = closingTab?.dirty ? 1 : 0;
+    if (dirtyCount > 0) {
+      setPendingCloseRequest({ dirtyCount, kind: "tab", tabId });
+      return;
+    }
+    performCloseWorkbenchTab(tabId);
+  }
+
+  function performCloseWorkbenchTab(tabId: string) {
     if (!pane) return;
     const closingTab = pane.tabs.find((tab) => tab.id === tabId);
     if (pane.tabs.length > 1) {
@@ -176,7 +238,18 @@ export function WorkbenchPaneView(
       paneState.closeTab(tabId);
       return;
     }
-    closePane();
+    performClosePane();
+  }
+
+  function confirmPendingCloseRequest() {
+    const request = pendingCloseRequest;
+    if (!request) return;
+    setPendingCloseRequest(undefined);
+    if (request.kind === "tab") {
+      performCloseWorkbenchTab(request.tabId);
+      return;
+    }
+    performClosePane();
   }
 
   function closeTerminalSessions(tabs: WorkbenchTab[]) {
@@ -388,7 +461,7 @@ export function WorkbenchPaneView(
                 nodeId={nodeId}
                 paneActive={active}
                 onClose={() =>
-                  closeWorkbenchTab(tab.id)}
+                  requestCloseWorkbenchTab(tab.id)}
                 onDragStart={() =>
                   setDraggingTabId(tab.id)}
                 onDragEnd={() => {
@@ -484,7 +557,7 @@ export function WorkbenchPaneView(
                     </FloatingMenuItem>
                     <FloatingMenuItem
                       className={paneOverflowMenuItemClassName}
-                      onClick={closePane}
+                      onClick={requestClosePane}
                       disabled={!canClosePane}
                     >
                       <X size={14} />
@@ -515,6 +588,16 @@ export function WorkbenchPaneView(
         ))}
         {active ? <div className={activePaneOutlineClassName} /> : null}
       </div>
+      {pendingCloseRequest
+        ? (
+          <UnsavedCloseConfirmModal
+            dirtyCount={pendingCloseRequest.dirtyCount}
+            kind={pendingCloseRequest.kind}
+            onCancel={() => setPendingCloseRequest(undefined)}
+            onConfirm={confirmPendingCloseRequest}
+          />
+        )
+        : null}
     </section>
   );
 }
@@ -533,4 +616,70 @@ function tabSplitSideFromEvent(
   if (nearest === right) return "right";
   if (nearest === top) return "top";
   return "bottom";
+}
+
+function dirtyTabCount(tabs: WorkbenchTab[]): number {
+  return tabs.filter((tab) => tab.dirty).length;
+}
+
+interface UnsavedCloseConfirmModalProps {
+  dirtyCount: number;
+  kind: PendingCloseRequest["kind"];
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+function UnsavedCloseConfirmModal(
+  { dirtyCount, kind, onCancel, onConfirm }: UnsavedCloseConfirmModalProps,
+) {
+  const closingPane = kind === "pane";
+  return (
+    <div
+      className={closeConfirmBackdropClassName}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onCancel();
+      }}
+    >
+      <section
+        className={closeConfirmModalClassName}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="unsaved-close-title"
+      >
+        <header className={closeConfirmHeadClassName}>
+          <div>
+            <span>{closingPane ? "Pane" : "Tab"}</span>
+            <h2 id="unsaved-close-title">Unsaved changes</h2>
+          </div>
+          <Button
+            onClick={onCancel}
+            title="Close"
+            aria-label="Close unsaved changes dialog"
+            className={closeConfirmIconButtonClassName}
+          >
+            <X size={16} />
+          </Button>
+        </header>
+        <div className={closeConfirmBodyClassName}>
+          <p>
+            {closingPane
+              ? dirtyCount === 1
+                ? "This pane contains a tab with unsaved changes."
+                : `This pane contains ${dirtyCount} tabs with unsaved changes.`
+              : "This tab has unsaved changes."}
+          </p>
+          <p>Close it anyway?</p>
+          <div className={closeConfirmActionsClassName}>
+            <Button onClick={onCancel}>Cancel</Button>
+            <Button
+              className={closeConfirmDangerButtonClassName}
+              onClick={onConfirm}
+            >
+              Close without saving
+            </Button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
 }

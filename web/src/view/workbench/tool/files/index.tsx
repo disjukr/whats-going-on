@@ -20,12 +20,14 @@ import {
   displayName,
   explorerBunja,
   ExplorerPaneScope,
+  writeExplorerFileNavigationState,
 } from "../../../../state/explorer.ts";
 import { machineModalBunja } from "../../../../state/machine-modal.ts";
 import { machineStoreBunja } from "../../../../state/machine-store.ts";
 import { rpcSessionBunja } from "../../../../state/rpc-session.ts";
 import {
   workbenchBunja,
+  workbenchPaneBunja,
   workbenchTabBunja,
 } from "../../../../state/workbench.ts";
 import {
@@ -119,6 +121,7 @@ export function FilesTool() {
   const isPaired = useAtomValue(machineStore.selectedIsPairedAtom);
   const daemonInstanceId = useAtomValue(rpcSession.daemonInstanceIdAtom);
   const workbench = useBunja(workbenchBunja);
+  const paneState = useBunja(workbenchPaneBunja);
   const tabState = useBunja(workbenchTabBunja);
   const explorer = useBunja(explorerBunja, [
     ExplorerPaneScope.bind(tabState.tabId),
@@ -187,7 +190,6 @@ export function FilesTool() {
     goUp,
     navigate,
     openEntry,
-    openFile,
     selectEntry,
   } = explorer;
   const currentPath = useAtomValue(currentPathAtom);
@@ -216,7 +218,13 @@ export function FilesTool() {
     }
 
     selectEntry(entry);
-    openFile(entry);
+    const tabId = paneState.addFilesTab();
+    writeExplorerFileNavigationState(
+      machine?.id,
+      tabId,
+      currentPath,
+      entry,
+    );
   }
 
   function openEntryMenu(

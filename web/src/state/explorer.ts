@@ -406,6 +406,12 @@ export const explorerBunja = bunja(() => {
       ? get(directory.directoryRowsAtom)
       : get(roots.rootsAtom)
   );
+  const openedFileAtom = atom((get) => {
+    const openedFile = get(navigation.openedFileAtom);
+    if (!openedFile) return undefined;
+    return get(rowsAtom).find((entry) => entry.path === openedFile.path) ??
+      openedFile;
+  });
   const visibleRowsAtom = atom((get) => sortEntries(get(rowsAtom)));
   const selectedEntryAtom = atom((get) =>
     get(rowsAtom).find((entry) =>
@@ -417,7 +423,7 @@ export const explorerBunja = bunja(() => {
     currentPathAtom: navigation.currentPathAtom,
     displayPathAtom: navigation.displayPathAtom,
     historyAtom: navigation.historyAtom,
-    openedFileAtom: navigation.openedFileAtom,
+    openedFileAtom,
     selectedPathAtom: navigation.selectedPathAtom,
     visibleRowsAtom,
     selectedEntryAtom,
@@ -483,6 +489,26 @@ export function copyExplorerNavigationState(
     storage.setItem(targetKey, sourceValue);
   } catch {
     // Keep pane splitting usable even if persisted tab state cannot be copied.
+  }
+}
+
+export function writeExplorerFileNavigationState(
+  machineId: string | undefined,
+  paneScopeId: string,
+  currentPath: string | undefined,
+  openedFile: FsEntry,
+) {
+  try {
+    const storage = globalThis.localStorage;
+    const targetKey = explorerNavigationStorageKey(machineId, paneScopeId);
+    const state: ExplorerNavigationState = {
+      currentPath,
+      history: [],
+      openedFile,
+    };
+    storage.setItem(targetKey, JSON.stringify(state));
+  } catch {
+    // Opening a file should still work even if persisted tab state is unavailable.
   }
 }
 

@@ -15,6 +15,7 @@ export type WorkbenchTool = "daemon" | "files" | "processes" | "terminal";
 export interface WorkbenchTab {
   daemonClientDetailId?: string;
   daemonClientsPageOpen?: boolean;
+  dirty?: boolean;
   id: string;
   title: string;
   tool: WorkbenchTool;
@@ -174,12 +175,12 @@ export const workbenchBunja = bunja(() => {
     );
   }
 
-  function addFilesTab(paneId: string) {
-    addToolTab(paneId, "files");
+  function addFilesTab(paneId: string): string {
+    return addToolTab(paneId, "files");
   }
 
-  function addDaemonTab(paneId: string) {
-    addToolTab(paneId, "daemon");
+  function addDaemonTab(paneId: string): string {
+    return addToolTab(paneId, "daemon");
   }
 
   function addTerminalTab(
@@ -257,6 +258,28 @@ export const workbenchBunja = bunja(() => {
     );
   }
 
+  function setTabDirty(paneId: string, tabId: string, dirty: boolean) {
+    store.set(
+      stateAtom,
+      (current) => {
+        let changed = false;
+        const panes = current.panes.map((pane) => {
+          if (pane.id !== paneId) return pane;
+          let paneChanged = false;
+          const tabs = pane.tabs.map((tab) => {
+            if (tab.id !== tabId) return tab;
+            if (Boolean(tab.dirty) === dirty) return tab;
+            changed = true;
+            paneChanged = true;
+            return { ...tab, dirty: dirty ? true : undefined };
+          });
+          return paneChanged ? { ...pane, tabs } : pane;
+        });
+        return changed ? { ...current, panes } : current;
+      },
+    );
+  }
+
   function setDaemonClientDetailId(
     paneId: string,
     tabId: string,
@@ -307,9 +330,10 @@ export const workbenchBunja = bunja(() => {
     );
   }
 
-  function addToolTab(paneId: string, tool: WorkbenchTool) {
+  function addToolTab(paneId: string, tool: WorkbenchTool): string {
     const tab = createWorkbenchTab(tool);
     store.set(stateAtom, (current) => openTabInPane(current, paneId, tab));
+    return tab.id;
   }
 
   function selectTab(paneId: string, tabId: string) {
@@ -469,6 +493,7 @@ export const workbenchBunja = bunja(() => {
     moveTabToNewPane,
     setDaemonClientDetailId,
     setDaemonClientsPageOpen,
+    setTabDirty,
     setTerminalSessionSnapshot,
     setTerminalSessionId,
   };
@@ -491,12 +516,12 @@ export const workbenchPaneBunja = bunja(() => {
     return workbench.addPane(paneId);
   }
 
-  function addFilesTab() {
-    workbench.addFilesTab(paneId);
+  function addFilesTab(): string {
+    return workbench.addFilesTab(paneId);
   }
 
-  function addDaemonTab() {
-    workbench.addDaemonTab(paneId);
+  function addDaemonTab(): string {
+    return workbench.addDaemonTab(paneId);
   }
 
   function addTerminalTab(config: WorkbenchTerminalTabConfig = {}) {
@@ -573,6 +598,10 @@ export const workbenchPaneBunja = bunja(() => {
     );
   }
 
+  function setTabDirty(tabId: string, dirty: boolean) {
+    workbench.setTabDirty(paneId, tabId, dirty);
+  }
+
   return {
     paneId,
     paneAtom,
@@ -590,6 +619,7 @@ export const workbenchPaneBunja = bunja(() => {
     moveTabToNewPane,
     setDaemonClientDetailId,
     setDaemonClientsPageOpen,
+    setTabDirty,
     setTerminalSessionSnapshot,
     setTerminalSessionId,
   };
@@ -613,6 +643,7 @@ export const workbenchTabBunja = bunja(() => {
     const paneValue = get(pane.paneAtom);
     return (paneValue?.tabs.length ?? 0) > 1 || get(pane.paneCountAtom) > 1;
   });
+  const dirtyAtom = atom((get) => Boolean(get(tabAtom)?.dirty));
 
   function selectTab() {
     pane.selectTab(tabId);
@@ -636,16 +667,22 @@ export const workbenchTabBunja = bunja(() => {
     pane.setDaemonClientsPageOpen(tabId, daemonClientsPageOpen);
   }
 
+  function setDirty(dirty: boolean) {
+    pane.setTabDirty(tabId, dirty);
+  }
+
   return {
     paneId: pane.paneId,
     tabId,
     tabAtom,
     activeAtom,
+    dirtyAtom,
     focusedAtom,
     showCloseAtom,
     selectTab,
     setDaemonClientDetailId,
     setDaemonClientsPageOpen,
+    setDirty,
     setTerminalSessionSnapshot,
     setTerminalSessionId,
   };
@@ -823,6 +860,7 @@ function cloneWorkbenchTab(tab: WorkbenchTab): WorkbenchTab {
   }
   return {
     ...tab,
+    dirty: undefined,
     id: `${tab.tool}-${crypto.randomUUID()}`,
   };
 }

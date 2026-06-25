@@ -3,7 +3,7 @@ import { useAtomValue } from "jotai";
 import { FilesExplorerContext, requireFilesExplorer } from "../context.tsx";
 import { DirectoryContent } from "./directory/index.tsx";
 import { FileViewer } from "./file-viewer/index.tsx";
-import { FsEntryContext } from "./file-viewer/state.tsx";
+import { FsEntryContext, FsEntryPathContext } from "./file-viewer/state.tsx";
 
 export function FilesContent() {
   const explorer = requireFilesExplorer(useContext(FilesExplorerContext));
@@ -11,9 +11,11 @@ export function FilesContent() {
 
   if (openedFile) {
     return (
-      <FsEntryContext value={openedFile}>
-        <FileViewer />
-      </FsEntryContext>
+      <FsEntryPathContext value={openedFile.path}>
+        <FsEntryContext value={openedFile}>
+          <FileViewer />
+        </FsEntryContext>
+      </FsEntryPathContext>
     );
   }
 

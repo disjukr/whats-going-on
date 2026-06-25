@@ -1,14 +1,23 @@
-import { lazy, Suspense, useContext, useEffect, useState } from "react";
+import { lazy, Suspense, useContext, useEffect, useRef, useState } from "react";
 import { useBunja } from "bunja/react";
 import { useAtomValue } from "jotai";
-import { readFile } from "../../../../../../../../protocol/rpc.ts";
-import type { FsEntry } from "../../../../../../../../protocol/rpc.ts";
+import {
+  type FsEntry,
+  readFile,
+  writeFile,
+  WriteFileMode,
+} from "../../../../../../../../protocol/rpc.ts";
+import { workbenchTabBunja } from "../../../../../../../../state/workbench.ts";
 import {
   FilesActionsContext,
   requireFilesActions,
 } from "../../../../context.tsx";
 import { BigFileWarning } from "../../big-file-warning.tsx";
-import { fileViewerBunja } from "../../state.tsx";
+import {
+  fileViewerBunja,
+  FsEntryContext,
+  requireFsEntry,
+} from "../../state.tsx";
 
 const MonacoTextViewer = lazy(async () => {
   const module = await import("./monaco-text-viewer.tsx");
@@ -25,7 +34,12 @@ const fileViewerStatusClassName = [
 
 type FileReadState =
   | { phase: "loading" }
-  | { phase: "ready"; text: string }
+  | {
+    draftText: string;
+    phase: "ready";
+    saveError?: string;
+    saving: boolean;
+  }
   | { phase: "error"; message: string };
 
 const textViewerName = "text viewer";
@@ -33,9 +47,11 @@ const textViewerName = "text viewer";
 export default function TextFileViewer() {
   const actions = requireFilesActions(useContext(FilesActionsContext));
   const viewer = useBunja(fileViewerBunja);
-  const fsEntry = viewer.fsEntry;
+  const tabState = useBunja(workbenchTabBunja);
+  const fsEntry = requireFsEntry(useContext(FsEntryContext));
   const viewerState = useAtomValue(viewer.stateAtom);
   const machine = useAtomValue(viewer.machineAtom);
+  const dirty = useAtomValue(tabState.dirtyAtom);
   const webTransport = viewer.webTransport;
   const requiresConfirmation = fsEntry.size === undefined ||
     fsEntry.size > inlineOpenLimitBytes;
@@ -44,22 +60,46 @@ export default function TextFileViewer() {
   >();
   const confirmed = !requiresConfirmation ||
     confirmedFsEntryPath === fsEntry.path;
+  const fileVersionKey = textFileVersionKey(
+    fsEntry.path,
+    fsEntry.size,
+    fsEntry.modifiedAtMs,
+  );
   const [state, setState] = useState<FileReadState>({ phase: "loading" });
+  const loadedFileVersionKeyRef = useRef<string | undefined>(undefined);
+  const ownSavedFileVersionRef = useRef<
+    { modifiedAtMs?: number; path: string; size: number } | undefined
+  >(undefined);
+  const savedTextRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     if (!confirmed || !machine || viewerState.phase !== "ready") return;
+    if (dirty) return;
+    if (loadedFileVersionKeyRef.current === fileVersionKey) return;
+    if (
+      ownSavedFileVersionRef.current &&
+      isOwnSavedFileVersion(ownSavedFileVersionRef.current, fsEntry)
+    ) {
+      loadedFileVersionKeyRef.current = fileVersionKey;
+      ownSavedFileVersionRef.current = undefined;
+      return;
+    }
 
     let cancelled = false;
+    savedTextRef.current = undefined;
+    tabState.setDirty(false);
     setState({ phase: "loading" });
     void (async () => {
       try {
-        const bytes = hasCompleteInitialBytes(fsEntry, viewerState.initialBytes)
-          ? viewerState.initialBytes
-          : await readFile(await webTransport(), fsEntry.path);
+        const bytes = await readFile(await webTransport(), fsEntry.path);
         if (cancelled) return;
+        const text = decodeTextFile(bytes);
+        loadedFileVersionKeyRef.current = fileVersionKey;
+        savedTextRef.current = text;
         setState({
+          draftText: text,
           phase: "ready",
-          text: decodeTextFile(bytes),
+          saving: false,
         });
       } catch (err) {
         if (!cancelled) {
@@ -73,7 +113,84 @@ export default function TextFileViewer() {
     return () => {
       cancelled = true;
     };
-  }, [confirmed, fsEntry, fsEntry.path, machine, webTransport, viewerState]);
+  }, [
+    confirmed,
+    dirty,
+    fileVersionKey,
+    fsEntry.path,
+    machine,
+    tabState,
+    webTransport,
+    viewerState,
+  ]);
+
+  function changeDraftText(nextText: string) {
+    tabState.setDirty(
+      savedTextRef.current !== undefined && nextText !== savedTextRef.current,
+    );
+    setState((current) => {
+      if (current.phase !== "ready") return current;
+      return {
+        ...current,
+        draftText: nextText,
+        saveError: undefined,
+      };
+    });
+  }
+
+  function saveDraftText(nextText: string) {
+    setState((current) =>
+      current.phase === "ready"
+        ? {
+          ...current,
+          draftText: nextText,
+          saveError: undefined,
+          saving: true,
+        }
+        : current
+    );
+
+    void (async () => {
+      try {
+        const bytes = new TextEncoder().encode(nextText);
+        const result = await writeFile(
+          await webTransport(),
+          fsEntry.path,
+          WriteFileMode.Replace,
+          bytes,
+          { expectedResultSize: bytes.byteLength },
+        );
+        loadedFileVersionKeyRef.current = fileVersionKey;
+        ownSavedFileVersionRef.current = {
+          modifiedAtMs: result.modifiedAtMs,
+          path: fsEntry.path,
+          size: result.resultSize,
+        };
+        savedTextRef.current = nextText;
+        setState((current) =>
+          current.phase === "ready"
+            ? {
+              ...current,
+              draftText: nextText,
+              saveError: undefined,
+              saving: false,
+            }
+            : current
+        );
+        tabState.setDirty(false);
+      } catch (err) {
+        setState((current) =>
+          current.phase === "ready"
+            ? {
+              ...current,
+              saveError: err instanceof Error ? err.message : String(err),
+              saving: false,
+            }
+            : current
+        );
+      }
+    })();
+  }
 
   if (!machine) {
     return (
@@ -119,18 +236,47 @@ export default function TextFileViewer() {
         </div>
       }
     >
-      <MonacoTextViewer path={fsEntry.path} text={state.text} />
+      <div className="relative w-full h-full min-w-0 min-h-0">
+        <MonacoTextViewer
+          key={fsEntry.path}
+          path={fsEntry.path}
+          text={state.draftText}
+          onChange={changeDraftText}
+          onSave={saveDraftText}
+        />
+        {state.saving || state.saveError
+          ? (
+            <div className="absolute right-[8px] bottom-[8px] z-[2] rounded-[4px] border border-[#d8dde7] bg-white px-[8px] py-[4px] text-[#344054] shadow-[0_8px_24px_rgb(16_24_40_/_12%)]">
+              {state.saving ? "Saving" : state.saveError}
+            </div>
+          )
+          : null}
+      </div>
     </Suspense>
   );
 }
 
-function hasCompleteInitialBytes(
-  fsEntry: FsEntry,
-  initialBytes: Uint8Array,
-): boolean {
-  return fsEntry.size !== undefined && fsEntry.size <= initialBytes.byteLength;
-}
-
 function decodeTextFile(bytes: Uint8Array): string {
   return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+}
+
+function textFileVersionKey(
+  path: string,
+  size: number | undefined,
+  modifiedAtMs: number | undefined,
+): string {
+  return [
+    path,
+    size ?? "",
+    modifiedAtMs ?? "",
+  ].join("\n");
+}
+
+function isOwnSavedFileVersion(
+  saved: { modifiedAtMs?: number; path: string; size: number },
+  entry: FsEntry,
+): boolean {
+  if (entry.path !== saved.path || entry.size !== saved.size) return false;
+  return saved.modifiedAtMs === undefined ||
+    entry.modifiedAtMs === saved.modifiedAtMs;
 }
