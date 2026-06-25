@@ -3,8 +3,10 @@ import { useAtomValue } from "jotai";
 import {
   FilesActionsContext,
   FilesExplorerContext,
+  FilesRenameContext,
   requireFilesActions,
   requireFilesExplorer,
+  requireFilesRenameState,
 } from "../../context.tsx";
 import { FileTable } from "./file-table.tsx";
 import { Inspector } from "./entry-details.tsx";
@@ -27,6 +29,7 @@ const explorerFooterClassName = [
 export function DirectoryContent() {
   const actions = requireFilesActions(useContext(FilesActionsContext));
   const explorer = requireFilesExplorer(useContext(FilesExplorerContext));
+  const rename = requireFilesRenameState(useContext(FilesRenameContext));
   const currentPath = useAtomValue(explorer.currentPathAtom);
   const rows = useAtomValue(explorer.visibleRowsAtom);
   const selectedEntry = useAtomValue(explorer.selectedEntryAtom);
@@ -42,6 +45,13 @@ export function DirectoryContent() {
           onOpen={actions.openEntry}
           onContextMenu={actions.openEntryMenu}
           onFolderContextMenu={actions.openFolderMenu}
+          renameDraftName={rename.draftName}
+          renamingPath={rename.entryPath}
+          renameError={rename.error}
+          renameIsSaving={rename.isRenaming}
+          onRenameCancel={rename.cancelRename}
+          onRenameCommit={rename.commitRename}
+          onRenameDraftChange={rename.updateDraftName}
         />
         <Inspector entry={selectedEntry} currentPath={currentPath} />
       </div>

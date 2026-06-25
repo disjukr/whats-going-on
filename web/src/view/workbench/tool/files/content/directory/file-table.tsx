@@ -16,9 +16,16 @@ interface FileTableProps {
   onOpen: (entry: FsEntry) => void;
   onContextMenu: (
     entry: FsEntry,
-    event: React.MouseEvent<HTMLButtonElement>,
+    event: React.MouseEvent<HTMLDivElement>,
   ) => void;
   onFolderContextMenu: (event: React.MouseEvent<HTMLDivElement>) => void;
+  renameDraftName: string;
+  renameError?: string;
+  renameIsSaving: boolean;
+  renamingPath?: string;
+  onRenameCancel: () => void;
+  onRenameCommit: (entry: FsEntry) => void;
+  onRenameDraftChange: (value: string) => void;
 }
 
 const fileTableClassName = [
@@ -47,6 +54,18 @@ const fileNameCellClassName = `${fileCellBaseClassName} name gap-[6px]`;
 const fileMetaCellClassName = `${fileCellBaseClassName} text-[#667085]`;
 const fileNameClassName =
   "min-w-0 overflow-hidden text-ellipsis whitespace-nowrap leading-[1.6]";
+const fileNameInputClassName = [
+  "block min-w-0 min-h-0 w-full h-[1.8rem] box-border appearance-none rounded-[3px]",
+  "border border-transparent bg-white px-[3px] py-0",
+  "text-[#20242d] [font:inherit] leading-[1.6rem]",
+  "outline-none [outline-offset:0] focus:outline-none focus:[outline:none] focus:[outline-offset:0]",
+  "focus:border-[#2f6fd6]",
+  "disabled:opacity-64",
+].join(" ");
+const fileRenameErrorClassName = [
+  "min-w-0 overflow-hidden text-ellipsis whitespace-nowrap",
+  "text-[#b42318]",
+].join(" ");
 const readonlyClassName = [
   "flex-[0_0_auto] border border-[#e4c778] rounded-full bg-[#fff8df]",
   "text-[#8a6116] px-[4px] py-0 leading-[1]",
@@ -63,6 +82,13 @@ export function FileTable(
     onOpen,
     onContextMenu,
     onFolderContextMenu,
+    renameDraftName,
+    renameError,
+    renameIsSaving,
+    renamingPath,
+    onRenameCancel,
+    onRenameCommit,
+    onRenameDraftChange,
   }: FileTableProps,
 ) {
   function openFolderContextMenu(event: React.MouseEvent<HTMLDivElement>) {
@@ -103,45 +129,123 @@ export function FileTable(
       {rows.length === 0
         ? <div className={tableEmptyClassName}>No rows</div>
         : (
-          rows.map((entry) => (
-            <button
-              type="button"
-              key={entry.path}
-              className={className(
-                fileRowClassName,
-                entry.path === selectedPath && "selected",
-              )}
-              onClick={() => onSelect(entry)}
-              onDoubleClick={() => onOpen(entry)}
-              onContextMenu={(event) => onContextMenu(entry, event)}
-              data-file-table-row
-            >
-              <span className={fileNameCellClassName}>
-                <EntryIcon entry={entry} />
-                <span className={fileNameClassName}>{displayName(entry)}</span>
-                {entry.readonly
-                  ? <span className={readonlyClassName}>readonly</span>
-                  : null}
-              </span>
-              <span className={`${fileMetaCellClassName} kind`}>
-                {kindLabel(entry.kind)}
-              </span>
-              <span className={`${fileMetaCellClassName} size`}>
-                {formatSize(entry.size)}
-              </span>
-              <span
+          rows.map((entry) => {
+            const renaming = entry.path === renamingPath;
+            return (
+              <div
+                key={entry.path}
                 className={className(
-                  fileMetaCellClassName,
-                  "modified",
-                  hideInNarrowContainerClassName,
+                  fileRowClassName,
+                  entry.path === selectedPath && "selected",
                 )}
+                role="row"
+                tabIndex={0}
+                onClick={() => onSelect(entry)}
+                onDoubleClick={() => onOpen(entry)}
+                onContextMenu={(event) => onContextMenu(entry, event)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  event.preventDefault();
+                  onOpen(entry);
+                }}
+                data-file-table-row
               >
-                {formatDate(entry.modifiedAtMs)}
-              </span>
-            </button>
-          ))
+                <span className={fileNameCellClassName}>
+                  <EntryIcon entry={entry} />
+                  {renaming
+                    ? (
+                      <RenameInput
+                        disabled={renameIsSaving}
+                        entry={entry}
+                        error={renameError}
+                        value={renameDraftName}
+                        onCancel={onRenameCancel}
+                        onChange={onRenameDraftChange}
+                        onCommit={onRenameCommit}
+                      />
+                    )
+                    : (
+                      <span className={fileNameClassName}>
+                        {displayName(entry)}
+                      </span>
+                    )}
+                  {entry.readonly
+                    ? <span className={readonlyClassName}>readonly</span>
+                    : null}
+                </span>
+                <span className={`${fileMetaCellClassName} kind`}>
+                  {kindLabel(entry.kind)}
+                </span>
+                <span className={`${fileMetaCellClassName} size`}>
+                  {formatSize(entry.size)}
+                </span>
+                <span
+                  className={className(
+                    fileMetaCellClassName,
+                    "modified",
+                    hideInNarrowContainerClassName,
+                  )}
+                >
+                  {formatDate(entry.modifiedAtMs)}
+                </span>
+              </div>
+            );
+          })
         )}
       <div className={tableBottomPaddingClassName} aria-hidden="true" />
     </div>
+  );
+}
+
+interface RenameInputProps {
+  disabled: boolean;
+  entry: FsEntry;
+  error?: string;
+  value: string;
+  onCancel: () => void;
+  onChange: (value: string) => void;
+  onCommit: (entry: FsEntry) => void;
+}
+
+function RenameInput(
+  { disabled, entry, error, value, onCancel, onChange, onCommit }:
+    RenameInputProps,
+) {
+  const inputRef = React.useRef<HTMLInputElement>(null);
+
+  React.useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    input.focus();
+    input.select();
+  }, []);
+
+  return (
+    <span className="inline-flex min-w-0 max-w-full flex-[1_1_auto] self-center">
+      <input
+        ref={inputRef}
+        className={fileNameInputClassName}
+        disabled={disabled}
+        value={value}
+        onBlur={() => onCommit(entry)}
+        onChange={(event) => onChange(event.currentTarget.value)}
+        onClick={(event) => event.stopPropagation()}
+        onDoubleClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            onCancel();
+            return;
+          }
+          if (event.key === "Enter") {
+            event.preventDefault();
+            event.stopPropagation();
+            onCommit(entry);
+          }
+        }}
+      />
+      {error ? <span className={fileRenameErrorClassName}>{error}</span> : null}
+    </span>
   );
 }

@@ -32,10 +32,20 @@ export interface FilesActions {
   openEntry: (entry: FsEntry) => void;
   openEntryMenu: (
     entry: FsEntry,
-    event: React.MouseEvent<HTMLButtonElement>,
+    event: React.MouseEvent<HTMLDivElement>,
   ) => void;
   openFolderMenu: (event: React.MouseEvent<HTMLDivElement>) => void;
   selectEntry: (entry: FsEntry) => void;
+}
+
+export interface FilesRenameState {
+  draftName: string;
+  entryPath?: string;
+  error?: string;
+  isRenaming: boolean;
+  cancelRename: () => void;
+  commitRename: (entry: FsEntry) => void;
+  updateDraftName: (value: string) => void;
 }
 
 export const FilesExplorerContext = createContext<
@@ -44,6 +54,9 @@ export const FilesExplorerContext = createContext<
   undefined,
 );
 export const FilesActionsContext = createContext<FilesActions | undefined>(
+  undefined,
+);
+export const FilesRenameContext = createContext<FilesRenameState | undefined>(
   undefined,
 );
 
@@ -59,4 +72,11 @@ export function requireFilesActions(
 ): FilesActions {
   if (!actions) throw new Error("Files actions context is not provided.");
   return actions;
+}
+
+export function requireFilesRenameState(
+  state: FilesRenameState | undefined,
+): FilesRenameState {
+  if (!state) throw new Error("Files rename context is not provided.");
+  return state;
 }

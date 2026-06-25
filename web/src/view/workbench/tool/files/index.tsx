@@ -6,6 +6,7 @@ import {
   Info,
   KeyRound,
   Loader2,
+  Pencil,
   SquareTerminal,
   Trash2,
   X,
@@ -15,6 +16,7 @@ import {
   deletePaths,
   FsEntry,
   FsEntryKind,
+  renamePaths,
 } from "../../../../protocol/rpc.ts";
 import {
   displayName,
@@ -34,6 +36,8 @@ import {
   type FilesActions,
   FilesActionsContext,
   FilesExplorerContext,
+  FilesRenameContext,
+  type FilesRenameState,
 } from "./context.tsx";
 import { Button } from "../../../ui/button.tsx";
 import { FilesContent } from "./content/index.tsx";
@@ -106,6 +110,13 @@ interface DeleteEntryState {
   isDeleting: boolean;
 }
 
+interface RenameEntryState {
+  draftName: string;
+  entry: FsEntry;
+  error?: string;
+  isRenaming: boolean;
+}
+
 interface DeleteEntryModalProps {
   state: DeleteEntryState;
   onClose: () => void;
@@ -132,6 +143,7 @@ export function FilesTool() {
   const [folderMenu, setFolderMenu] = useState<FolderMenuState>();
   const [propertiesEntry, setPropertiesEntry] = useState<FsEntry>();
   const [deleteEntry, setDeleteEntry] = useState<DeleteEntryState>();
+  const [renameEntry, setRenameEntry] = useState<RenameEntryState>();
   const defaultShell = useAtomValue(filesTool.defaultShellAtom);
   const terminalShells = useAtomValue(filesTool.terminalShellsAtom);
 
@@ -229,7 +241,7 @@ export function FilesTool() {
 
   function openEntryMenu(
     entry: FsEntry,
-    event: React.MouseEvent<HTMLButtonElement>,
+    event: React.MouseEvent<HTMLDivElement>,
   ) {
     event.preventDefault();
     event.stopPropagation();
@@ -257,6 +269,16 @@ export function FilesTool() {
   function openEntryProperties(entry: FsEntry) {
     setEntryMenu(undefined);
     setPropertiesEntry(entry);
+  }
+
+  function openRenameEntry(entry: FsEntry) {
+    setEntryMenu(undefined);
+    selectEntry(entry);
+    setRenameEntry({
+      draftName: displayName(entry),
+      entry,
+      isRenaming: false,
+    });
   }
 
   function openDeleteEntry(entry: FsEntry) {
@@ -318,6 +340,64 @@ export function FilesTool() {
     }
   }
 
+  async function commitRename(entry: FsEntry) {
+    if (
+      !machine || !currentPath || !renameEntry ||
+      renameEntry.entry.path !== entry.path || renameEntry.isRenaming
+    ) {
+      return;
+    }
+
+    const nextName = renameEntry.draftName;
+    if (nextName === displayName(entry)) {
+      setRenameEntry(undefined);
+      return;
+    }
+    if (nextName.trim() === "") {
+      setRenameEntry((current) =>
+        current && current.entry.path === entry.path
+          ? { ...current, error: "Name is required." }
+          : current
+      );
+      return;
+    }
+
+    setRenameEntry((current) =>
+      current && current.entry.path === entry.path
+        ? { ...current, error: undefined, isRenaming: true }
+        : current
+    );
+    try {
+      const transport = await rpcSession.webTransport();
+      const to = childPath(currentPath, nextName);
+      const result = await renamePaths(transport, [{ from: entry.path, to }]);
+      const failure = result.results.find((item) => !item.ok);
+      if (failure && !failure.ok) {
+        setRenameEntry((current) =>
+          current && current.entry.path === entry.path
+            ? {
+              ...current,
+              error: failure.message || failure.code,
+              isRenaming: false,
+            }
+            : current
+        );
+        return;
+      }
+      setRenameEntry(undefined);
+    } catch (err) {
+      setRenameEntry((current) =>
+        current && current.entry.path === entry.path
+          ? {
+            ...current,
+            error: err instanceof Error ? err.message : String(err),
+            isRenaming: false,
+          }
+          : current
+      );
+    }
+  }
+
   const actions: FilesActions = {
     goBack: goBackFromToolbar,
     goUp: goUpFromToolbar,
@@ -326,6 +406,18 @@ export function FilesTool() {
     openEntryMenu,
     openFolderMenu,
     selectEntry,
+  };
+  const renameState: FilesRenameState = {
+    draftName: renameEntry?.draftName ?? "",
+    entryPath: renameEntry?.entry.path,
+    error: renameEntry?.error,
+    isRenaming: renameEntry?.isRenaming ?? false,
+    cancelRename: () => setRenameEntry(undefined),
+    commitRename,
+    updateDraftName: (draftName) =>
+      setRenameEntry((current) =>
+        current ? { ...current, draftName, error: undefined } : current
+      ),
   };
 
   if (!machine) {
@@ -356,9 +448,11 @@ export function FilesTool() {
     <section className={explorerClassName}>
       <FilesExplorerContext value={explorer}>
         <FilesActionsContext value={actions}>
-          <FilesNavbar />
+          <FilesRenameContext value={renameState}>
+            <FilesNavbar />
 
-          <FilesContent />
+            <FilesContent />
+          </FilesRenameContext>
         </FilesActionsContext>
       </FilesExplorerContext>
 
@@ -376,13 +470,21 @@ export function FilesTool() {
             </FloatingMenuItem>
             {currentPath
               ? (
-                <FloatingMenuItem
-                  danger
-                  onClick={() => openDeleteEntry(entryMenu.entry)}
-                >
-                  <Trash2 size={15} />
-                  Delete...
-                </FloatingMenuItem>
+                <>
+                  <FloatingMenuItem
+                    onClick={() => openRenameEntry(entryMenu.entry)}
+                  >
+                    <Pencil size={15} />
+                    Rename
+                  </FloatingMenuItem>
+                  <FloatingMenuItem
+                    danger
+                    onClick={() => openDeleteEntry(entryMenu.entry)}
+                  >
+                    <Trash2 size={15} />
+                    Delete...
+                  </FloatingMenuItem>
+                </>
               )
               : null}
           </FloatingMenu>
@@ -436,7 +538,7 @@ function entryContextMenuPosition(
   hasDeleteItem: boolean,
 ): { x: number; y: number } {
   const position = clampFloatingMenuPosition(x, y, {
-    itemCount: hasDeleteItem ? 2 : 1,
+    itemCount: hasDeleteItem ? 3 : 1,
     width: entryContextMenuWidth,
   });
   return { x: position.left, y: position.top };
@@ -451,6 +553,13 @@ function folderContextMenuPosition(
     width: entryContextMenuWidth,
   });
   return { x: position.left, y: position.top };
+}
+
+function childPath(directory: string, name: string): string {
+  const separator = directory.includes("\\") ? "\\" : "/";
+  return directory.endsWith("/") || directory.endsWith("\\")
+    ? `${directory}${name}`
+    : `${directory}${separator}${name}`;
 }
 
 function DeleteEntryModal(
