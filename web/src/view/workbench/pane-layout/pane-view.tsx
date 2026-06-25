@@ -71,7 +71,6 @@ const paneHandleClassName =
   "flex items-center justify-center self-stretch text-[#98a2b3] cursor-grab";
 const workbenchTabsClassName = [
   "flex items-end min-w-0 h-full overflow-visible",
-  "[&.drop-at-end]:[box-shadow:inset_-2px_0_0_#4f8cff]",
 ].join(" ");
 const paneActionsClassName = "flex items-center";
 const paneActionButtonGroupClassName =
@@ -497,22 +496,21 @@ export function WorkbenchPaneView(
           <GripVertical size={8} />
         </Handle>
         <div
-          className={className(
-            workbenchTabsClassName,
-            tabDropTarget?.position === "end" && "drop-at-end",
-          )}
+          className={workbenchTabsClassName}
           role="tablist"
           onDragOver={handleTabStripDragOver}
           onDrop={handleTabStripDrop}
           onDragLeave={handleTabStripDragLeave}
         >
-          {pane.tabs.map((tab) => (
+          {pane.tabs.map((tab, index) => (
             <WorkbenchTabIdContext key={tab.id} value={tab.id}>
               <WorkbenchTabItem
                 dragging={draggingTabId === tab.id}
-                dropPosition={tabDropTarget?.tabId === tab.id
-                  ? tabDropTarget.position
-                  : undefined}
+                dropPosition={tabDropPositionForTab(
+                  tabDropTarget,
+                  tab,
+                  index === pane.tabs.length - 1,
+                )}
                 nodeId={nodeId}
                 paneActive={active}
                 onClose={() =>
@@ -705,6 +703,17 @@ function tabSplitSideFromEvent(
   if (nearest === right) return "right";
   if (nearest === top) return "top";
   return "bottom";
+}
+
+function tabDropPositionForTab(
+  target: WorkbenchTabDropTarget | undefined,
+  tab: WorkbenchTab,
+  last: boolean,
+): TabDropPosition | undefined {
+  if (!target) return undefined;
+  if (target.tabId === tab.id) return target.position;
+  if (target.position === "end" && last) return "after";
+  return undefined;
 }
 
 function tabContextMenuPosition(
