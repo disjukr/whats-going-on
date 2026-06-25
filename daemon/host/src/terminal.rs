@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -260,8 +262,9 @@ impl TerminalManager {
     ) -> Result<TerminalSessionInfo, ServiceError> {
         validate_size(request.cols, request.rows)?;
         let launch = resolve_launch(&request.launch)?;
-        let mut command = CommandBuilder::new(&launch.command);
-        command.args(&launch.args);
+        let spawn_launch = terminal_spawn_launch(&launch);
+        let mut command = CommandBuilder::new(&spawn_launch.command);
+        command.args(&spawn_launch.args);
         let initial_cwd = request
             .cwd
             .clone()
@@ -718,6 +721,39 @@ fn resolve_launch(launch: &TerminalLaunchSpec) -> Result<LaunchCommand, ServiceE
     })
 }
 
+fn terminal_spawn_launch(launch: &LaunchCommand) -> LaunchCommand {
+    #[cfg(target_os = "macos")]
+    if should_spawn_terminal_as_macos_console_user() {
+        if let Some(user) = macos_console_user_name() {
+            let mut args = vec![
+                "-H".to_string(),
+                "-u".to_string(),
+                user,
+                "--".to_string(),
+                launch.command.clone(),
+            ];
+            args.extend(launch.args.clone());
+            return LaunchCommand {
+                command: "/usr/bin/sudo".to_string(),
+                args,
+                cwd: launch.cwd.clone(),
+            };
+        }
+    }
+
+    launch.clone()
+}
+
+#[cfg(target_os = "macos")]
+fn should_spawn_terminal_as_macos_console_user() -> bool {
+    current_effective_uid().as_deref() == Some("0")
+}
+
+#[cfg(target_os = "macos")]
+fn current_effective_uid() -> Option<String> {
+    trimmed_command_output("/usr/bin/id", &["-u"])
+}
+
 fn discover_available_shells() -> Vec<AvailableShellInfo> {
     let mut shells = Vec::new();
     #[cfg(windows)]
@@ -949,6 +985,7 @@ fn windows_terminal_shell_id(command: &str) -> String {
     }
 }
 
+#[cfg(windows)]
 fn command_file_name(command: &str) -> Option<String> {
     PathBuf::from(command)
         .file_name()
@@ -1012,7 +1049,7 @@ fn split_windows_command_line(command_line: &str) -> Vec<String> {
 
 #[cfg(not(windows))]
 fn discover_unix_shells(shells: &mut Vec<AvailableShellInfo>) {
-    let default_shell = std::env::var("SHELL").ok();
+    let default_shell = default_unix_shell();
     let mut paths = Vec::new();
     if let Ok(text) = std::fs::read_to_string("/etc/shells") {
         for line in text.lines() {
@@ -1041,6 +1078,61 @@ fn discover_unix_shells(shells: &mut Vec<AvailableShellInfo>) {
             default_shell.as_deref() == Some(path.as_str()) || shells.is_empty(),
         ));
     }
+}
+
+#[cfg(not(windows))]
+fn default_unix_shell() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    if let Some(shell) = macos_console_user_shell() {
+        return Some(shell);
+    }
+
+    std::env::var("SHELL")
+        .ok()
+        .map(|shell| shell.trim().to_string())
+        .filter(|shell| !shell.is_empty())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_console_user_shell() -> Option<String> {
+    let user = macos_console_user_name()?;
+
+    let output = std::process::Command::new("/usr/bin/dscl")
+        .args([".", "-read", &format!("/Users/{user}"), "UserShell"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_dscl_user_shell(&String::from_utf8(output.stdout).ok()?)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_dscl_user_shell(output: &str) -> Option<String> {
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("UserShell:"))
+        .map(str::trim)
+        .filter(|shell| !shell.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_console_user_name() -> Option<String> {
+    trimmed_command_output("/usr/bin/stat", &["-f", "%Su", "/dev/console"])
+        .filter(|user| user != "root")
+}
+
+#[cfg(target_os = "macos")]
+fn trimmed_command_output(command: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(command).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn shell_info(
@@ -1085,6 +1177,7 @@ fn dedupe_shells(shells: Vec<AvailableShellInfo>) -> Vec<AvailableShellInfo> {
     output
 }
 
+#[cfg(windows)]
 fn find_on_path(binary: &str) -> Option<String> {
     let paths = std::env::var_os("PATH")?;
     std::env::split_paths(&paths)
@@ -1107,4 +1200,19 @@ fn current_unix_ms() -> u64 {
 
 fn operation_failed(err: impl std::fmt::Display) -> ServiceError {
     ServiceError::OperationFailed(err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "macos")]
+    use super::parse_dscl_user_shell;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parses_macos_user_shell_from_dscl_output() {
+        assert_eq!(
+            parse_dscl_user_shell("UserShell: /bin/zsh\n"),
+            Some("/bin/zsh".to_string())
+        );
+    }
 }

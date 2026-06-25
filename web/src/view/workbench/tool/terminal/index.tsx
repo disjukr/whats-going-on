@@ -654,11 +654,29 @@ export function TerminalTool() {
     tabState.setTerminalSessionId(undefined);
   }
 
-  function openNewTerminalSession() {
+  async function openNewTerminalSession() {
+    const exitedSessionId = sessionInfo?.exit
+      ? sessionInfo.terminalSessionId
+      : undefined;
     const launch = sessionInfo?.launch ?? tab?.terminalLaunch;
     const cwd = sessionInfo?.lastKnownCwd ?? tab?.terminalLastKnownCwd;
     const title = sessionInfo?.lastKnownTitle ?? tab?.terminalLastKnownTitle ??
       tab?.title;
+
+    if (exitedSessionId) {
+      try {
+        await closeTerminalSession(
+          await rpcSession.webTransport(),
+          exitedSessionId,
+        );
+      } catch (err) {
+        if (!isTerminalSessionNotFoundError(err)) {
+          setStatus({ phase: "error", message: errorMessage(err) });
+          return;
+        }
+      }
+    }
+
     clearTerminalSessionReference();
     void openTerminal({
       cwd,
@@ -710,7 +728,7 @@ export function TerminalTool() {
                   ? (
                     <Button
                       className={terminalNoticeButtonClassName}
-                      onClick={openNewTerminalSession}
+                      onClick={() => void openNewTerminalSession()}
                     >
                       {terminalNotice.actionLabel}
                     </Button>
@@ -730,7 +748,7 @@ export function TerminalTool() {
               ? (
                 <Button
                   className={terminalNoticeButtonClassName}
-                  onClick={openNewTerminalSession}
+                  onClick={() => void openNewTerminalSession()}
                 >
                   {terminalNotice.actionLabel}
                 </Button>
