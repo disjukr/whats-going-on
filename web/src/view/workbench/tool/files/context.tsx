@@ -48,6 +48,16 @@ export interface FilesRenameState {
   updateDraftName: (value: string) => void;
 }
 
+export interface FilesCreateFileState {
+  draftName: string;
+  error?: string;
+  isCreating: boolean;
+  isEditing: boolean;
+  cancelCreate: () => void;
+  commitCreate: () => void;
+  updateDraftName: (value: string) => void;
+}
+
 export const FilesExplorerContext = createContext<
   FilesExplorerState | undefined
 >(
@@ -57,6 +67,11 @@ export const FilesActionsContext = createContext<FilesActions | undefined>(
   undefined,
 );
 export const FilesRenameContext = createContext<FilesRenameState | undefined>(
+  undefined,
+);
+export const FilesCreateFileContext = createContext<
+  FilesCreateFileState | undefined
+>(
   undefined,
 );
 
@@ -78,5 +93,12 @@ export function requireFilesRenameState(
   state: FilesRenameState | undefined,
 ): FilesRenameState {
   if (!state) throw new Error("Files rename context is not provided.");
+  return state;
+}
+
+export function requireFilesCreateFileState(
+  state: FilesCreateFileState | undefined,
+): FilesCreateFileState {
+  if (!state) throw new Error("Files create-file context is not provided.");
   return state;
 }

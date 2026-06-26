@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { useAtomValue } from "jotai";
 import { useBunja } from "bunja/react";
 import {
+  FilePlus2,
   HardDrive,
   Info,
   KeyRound,
@@ -12,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  createNodes,
   DeleteMode,
   deletePaths,
   FsEntry,
@@ -35,6 +37,8 @@ import {
 import {
   type FilesActions,
   FilesActionsContext,
+  FilesCreateFileContext,
+  type FilesCreateFileState,
   FilesExplorerContext,
   FilesRenameContext,
   type FilesRenameState,
@@ -117,6 +121,12 @@ interface RenameEntryState {
   isRenaming: boolean;
 }
 
+interface CreateFileState {
+  draftName: string;
+  error?: string;
+  isCreating: boolean;
+}
+
 interface DeleteEntryModalProps {
   state: DeleteEntryState;
   onClose: () => void;
@@ -144,6 +154,7 @@ export function FilesTool() {
   const [propertiesEntry, setPropertiesEntry] = useState<FsEntry>();
   const [deleteEntry, setDeleteEntry] = useState<DeleteEntryState>();
   const [renameEntry, setRenameEntry] = useState<RenameEntryState>();
+  const [createFile, setCreateFile] = useState<CreateFileState>();
   const defaultShell = useAtomValue(filesTool.defaultShellAtom);
   const terminalShells = useAtomValue(filesTool.terminalShellsAtom);
 
@@ -286,6 +297,12 @@ export function FilesTool() {
     setDeleteEntry({ entry, isDeleting: false });
   }
 
+  function openCreateFile() {
+    setFolderMenu(undefined);
+    if (!currentPath) return;
+    setCreateFile({ draftName: "", isCreating: false });
+  }
+
   function openTerminalHere() {
     setFolderMenu(undefined);
     if (!currentPath) return;
@@ -398,6 +415,52 @@ export function FilesTool() {
     }
   }
 
+  async function commitCreateFile() {
+    if (!machine || !currentPath || !createFile || createFile.isCreating) {
+      return;
+    }
+
+    const name = createFile.draftName.trim();
+    if (name === "") {
+      setCreateFile(undefined);
+      return;
+    }
+
+    setCreateFile((current) =>
+      current ? { ...current, error: undefined, isCreating: true } : current
+    );
+    try {
+      const transport = await rpcSession.webTransport();
+      const result = await createNodes(transport, [
+        { path: childPath(currentPath, name), spec: { type: "file" } },
+      ]);
+      const failure = result.results.find((item) => !item.ok);
+      if (failure && !failure.ok) {
+        setCreateFile((current) =>
+          current
+            ? {
+              ...current,
+              error: failure.message || failure.code,
+              isCreating: false,
+            }
+            : current
+        );
+        return;
+      }
+      setCreateFile(undefined);
+    } catch (err) {
+      setCreateFile((current) =>
+        current
+          ? {
+            ...current,
+            error: err instanceof Error ? err.message : String(err),
+            isCreating: false,
+          }
+          : current
+      );
+    }
+  }
+
   const actions: FilesActions = {
     goBack: goBackFromToolbar,
     goUp: goUpFromToolbar,
@@ -416,6 +479,18 @@ export function FilesTool() {
     commitRename,
     updateDraftName: (draftName) =>
       setRenameEntry((current) =>
+        current ? { ...current, draftName, error: undefined } : current
+      ),
+  };
+  const createFileState: FilesCreateFileState = {
+    draftName: createFile?.draftName ?? "",
+    error: createFile?.error,
+    isCreating: createFile?.isCreating ?? false,
+    isEditing: Boolean(createFile),
+    cancelCreate: () => setCreateFile(undefined),
+    commitCreate: commitCreateFile,
+    updateDraftName: (draftName) =>
+      setCreateFile((current) =>
         current ? { ...current, draftName, error: undefined } : current
       ),
   };
@@ -448,11 +523,13 @@ export function FilesTool() {
     <section className={explorerClassName}>
       <FilesExplorerContext value={explorer}>
         <FilesActionsContext value={actions}>
-          <FilesRenameContext value={renameState}>
-            <FilesNavbar />
+          <FilesCreateFileContext value={createFileState}>
+            <FilesRenameContext value={renameState}>
+              <FilesNavbar />
 
-            <FilesContent />
-          </FilesRenameContext>
+              <FilesContent />
+            </FilesRenameContext>
+          </FilesCreateFileContext>
         </FilesActionsContext>
       </FilesExplorerContext>
 
@@ -497,6 +574,13 @@ export function FilesTool() {
             className="z-[30] w-[176px]"
             position={{ left: folderMenu.x, top: folderMenu.y }}
           >
+            <FloatingMenuItem
+              disabled={!currentPath}
+              onClick={openCreateFile}
+            >
+              <FilePlus2 size={15} />
+              New file
+            </FloatingMenuItem>
             <FloatingMenuItem
               disabled={!currentPath || terminalShells.length === 0}
               onClick={openTerminalHere}
@@ -549,7 +633,7 @@ function folderContextMenuPosition(
   y: number,
 ): { x: number; y: number } {
   const position = clampFloatingMenuPosition(x, y, {
-    itemCount: 1,
+    itemCount: 2,
     width: entryContextMenuWidth,
   });
   return { x: position.left, y: position.top };

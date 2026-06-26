@@ -1,5 +1,5 @@
 import React from "react";
-import { FsEntry } from "../../../../../../protocol/rpc.ts";
+import { FsEntry, FsEntryKind } from "../../../../../../protocol/rpc.ts";
 import {
   displayName,
   formatDate,
@@ -19,6 +19,13 @@ interface FileTableProps {
     event: React.MouseEvent<HTMLDivElement>,
   ) => void;
   onFolderContextMenu: (event: React.MouseEvent<HTMLDivElement>) => void;
+  createDraftName: string;
+  createError?: string;
+  createIsCreating: boolean;
+  createIsEditing: boolean;
+  onCreateCancel: () => void;
+  onCreateCommit: () => void;
+  onCreateDraftChange: (value: string) => void;
   renameDraftName: string;
   renameError?: string;
   renameIsSaving: boolean;
@@ -73,6 +80,12 @@ const readonlyClassName = [
 const tableEmptyClassName =
   "[grid-column:1/-1] flex items-center text-[#667085] px-[12px]";
 const tableBottomPaddingClassName = "[grid-column:1/-1] h-[10rem]";
+const newFileEntry: FsEntry = {
+  kind: FsEntryKind.File,
+  name: "",
+  path: "",
+  readonly: false,
+};
 
 export function FileTable(
   {
@@ -82,6 +95,13 @@ export function FileTable(
     onOpen,
     onContextMenu,
     onFolderContextMenu,
+    createDraftName,
+    createError,
+    createIsCreating,
+    createIsEditing,
+    onCreateCancel,
+    onCreateCommit,
+    onCreateDraftChange,
     renameDraftName,
     renameError,
     renameIsSaving,
@@ -126,7 +146,7 @@ export function FileTable(
       >
         Modified
       </div>
-      {rows.length === 0
+      {rows.length === 0 && !createIsEditing
         ? <div className={tableEmptyClassName}>No rows</div>
         : (
           rows.map((entry) => {
@@ -154,14 +174,13 @@ export function FileTable(
                   <EntryIcon entry={entry} />
                   {renaming
                     ? (
-                      <RenameInput
+                      <NameInput
                         disabled={renameIsSaving}
-                        entry={entry}
                         error={renameError}
                         value={renameDraftName}
                         onCancel={onRenameCancel}
                         onChange={onRenameDraftChange}
-                        onCommit={onRenameCommit}
+                        onCommit={() => onRenameCommit(entry)}
                       />
                     )
                     : (
@@ -192,24 +211,54 @@ export function FileTable(
             );
           })
         )}
+      {createIsEditing
+        ? (
+          <div
+            className={className(fileRowClassName, "selected")}
+            role="row"
+            data-file-table-row
+          >
+            <span className={fileNameCellClassName}>
+              <EntryIcon entry={newFileEntry} />
+              <NameInput
+                disabled={createIsCreating}
+                error={createError}
+                value={createDraftName}
+                onCancel={onCreateCancel}
+                onChange={onCreateDraftChange}
+                onCommit={onCreateCommit}
+              />
+            </span>
+            <span className={`${fileMetaCellClassName} kind`}>
+              {kindLabel(FsEntryKind.File)}
+            </span>
+            <span className={`${fileMetaCellClassName} size`} />
+            <span
+              className={className(
+                fileMetaCellClassName,
+                "modified",
+                hideInNarrowContainerClassName,
+              )}
+            />
+          </div>
+        )
+        : null}
       <div className={tableBottomPaddingClassName} aria-hidden="true" />
     </div>
   );
 }
 
-interface RenameInputProps {
+interface NameInputProps {
   disabled: boolean;
-  entry: FsEntry;
   error?: string;
   value: string;
   onCancel: () => void;
   onChange: (value: string) => void;
-  onCommit: (entry: FsEntry) => void;
+  onCommit: () => void;
 }
 
-function RenameInput(
-  { disabled, entry, error, value, onCancel, onChange, onCommit }:
-    RenameInputProps,
+function NameInput(
+  { disabled, error, value, onCancel, onChange, onCommit }: NameInputProps,
 ) {
   const inputRef = React.useRef<HTMLInputElement>(null);
 
@@ -227,7 +276,7 @@ function RenameInput(
         className={fileNameInputClassName}
         disabled={disabled}
         value={value}
-        onBlur={() => onCommit(entry)}
+        onBlur={onCommit}
         onChange={(event) => onChange(event.currentTarget.value)}
         onClick={(event) => event.stopPropagation()}
         onDoubleClick={(event) => event.stopPropagation()}
@@ -241,7 +290,7 @@ function RenameInput(
           if (event.key === "Enter") {
             event.preventDefault();
             event.stopPropagation();
-            onCommit(entry);
+            onCommit();
           }
         }}
       />

@@ -2,9 +2,11 @@ import { useContext } from "react";
 import { useAtomValue } from "jotai";
 import {
   FilesActionsContext,
+  FilesCreateFileContext,
   FilesExplorerContext,
   FilesRenameContext,
   requireFilesActions,
+  requireFilesCreateFileState,
   requireFilesExplorer,
   requireFilesRenameState,
 } from "../../context.tsx";
@@ -28,6 +30,9 @@ const explorerFooterClassName = [
 
 export function DirectoryContent() {
   const actions = requireFilesActions(useContext(FilesActionsContext));
+  const createFile = requireFilesCreateFileState(
+    useContext(FilesCreateFileContext),
+  );
   const explorer = requireFilesExplorer(useContext(FilesExplorerContext));
   const rename = requireFilesRenameState(useContext(FilesRenameContext));
   const currentPath = useAtomValue(explorer.currentPathAtom);
@@ -45,6 +50,13 @@ export function DirectoryContent() {
           onOpen={actions.openEntry}
           onContextMenu={actions.openEntryMenu}
           onFolderContextMenu={actions.openFolderMenu}
+          createDraftName={createFile.draftName}
+          createError={createFile.error}
+          createIsCreating={createFile.isCreating}
+          createIsEditing={createFile.isEditing}
+          onCreateCancel={createFile.cancelCreate}
+          onCreateCommit={createFile.commitCreate}
+          onCreateDraftChange={createFile.updateDraftName}
           renameDraftName={rename.draftName}
           renamingPath={rename.entryPath}
           renameError={rename.error}
