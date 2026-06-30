@@ -8,7 +8,7 @@ use wgo_daemon_core::rpc::{
     TrashItem as RpcTrashItem, TrashItemSize as RpcTrashItemSize, WriteFileChunk, WriteFileMode,
     WriteFileResult, WriteFileStart, MAX_U53,
 };
-use wgo_daemon_core::traits::{BoxFutureResult, FileService, ServiceError};
+use wgo_daemon_core::traits::{BoxFutureResult, FileService, ServiceError, WriteFileChunkSource};
 
 #[derive(Debug, Default, Clone)]
 pub struct WindowsFileService;
@@ -76,15 +76,15 @@ impl FileService for WindowsFileService {
         })
     }
 
-    fn write_file(
-        &self,
+    fn write_file<'a>(
+        &'a self,
         start: WriteFileStart,
-        chunks: Vec<WriteFileChunk>,
-    ) -> BoxFutureResult<'_, WriteFileResult> {
+        mut chunks: Box<dyn WriteFileChunkSource + 'a>,
+    ) -> BoxFutureResult<'a, WriteFileResult> {
         Box::pin(async move {
             let path = PathBuf::from(&start.path);
             ensure_parent_directory_exists(&path)?;
-            let bytes_written = write_file_chunks(&path, start.mode, &chunks)?;
+            let bytes_written = write_file_chunks(&path, start.mode, chunks.as_mut()).await?;
             set_modified_time_best_effort(&path, start.modified_at_ms);
             let metadata = fs::metadata(&path).map_err(map_io_error)?;
             let result_size = metadata.len();
@@ -230,10 +230,10 @@ fn unix_seconds_to_u53_ms(seconds: i64) -> Option<u64> {
         .filter(|value| *value <= MAX_U53)
 }
 
-fn write_file_chunks(
+async fn write_file_chunks(
     path: &Path,
     mode: WriteFileMode,
-    chunks: &[WriteFileChunk],
+    chunks: &mut dyn WriteFileChunkSource,
 ) -> Result<u64, ServiceError> {
     let mut bytes_written = 0u64;
     match mode {
@@ -243,7 +243,7 @@ fn write_file_chunks(
                 .create_new(true)
                 .open(path)
                 .map_err(map_io_error)?;
-            write_seekable_chunks(&mut file, chunks, false, &mut bytes_written)?;
+            write_seekable_chunks(&mut file, chunks, false, &mut bytes_written).await?;
         }
         WriteFileMode::Replace => {
             if let Ok(metadata) = fs::symlink_metadata(path) {
@@ -257,7 +257,7 @@ fn write_file_chunks(
                 .truncate(true)
                 .open(path)
                 .map_err(map_io_error)?;
-            write_seekable_chunks(&mut file, chunks, false, &mut bytes_written)?;
+            write_seekable_chunks(&mut file, chunks, false, &mut bytes_written).await?;
         }
         WriteFileMode::Append => {
             ensure_regular_file_exists(path)?;
@@ -265,12 +265,12 @@ fn write_file_chunks(
                 .append(true)
                 .open(path)
                 .map_err(map_io_error)?;
-            for chunk in chunks {
+            while let Some(chunk) = chunks.next_chunk().await? {
                 if chunk.offset.is_some() {
                     return Err(ServiceError::InvalidPath);
                 }
                 file.write_all(&chunk.bytes).map_err(map_io_error)?;
-                bytes_written = add_chunk_len(bytes_written, chunk)?;
+                bytes_written = add_chunk_len(bytes_written, &chunk)?;
             }
         }
         WriteFileMode::Patch => {
@@ -279,19 +279,19 @@ fn write_file_chunks(
                 .write(true)
                 .open(path)
                 .map_err(map_io_error)?;
-            write_seekable_chunks(&mut file, chunks, true, &mut bytes_written)?;
+            write_seekable_chunks(&mut file, chunks, true, &mut bytes_written).await?;
         }
     }
     Ok(bytes_written)
 }
 
-fn write_seekable_chunks(
+async fn write_seekable_chunks(
     file: &mut fs::File,
-    chunks: &[WriteFileChunk],
+    chunks: &mut dyn WriteFileChunkSource,
     require_offset: bool,
     bytes_written: &mut u64,
 ) -> Result<(), ServiceError> {
-    for chunk in chunks {
+    while let Some(chunk) = chunks.next_chunk().await? {
         match chunk.offset {
             Some(offset) => {
                 file.seek(SeekFrom::Start(offset)).map_err(map_io_error)?;
@@ -300,7 +300,7 @@ fn write_seekable_chunks(
             None => {}
         }
         file.write_all(&chunk.bytes).map_err(map_io_error)?;
-        *bytes_written = add_chunk_len(*bytes_written, chunk)?;
+        *bytes_written = add_chunk_len(*bytes_written, &chunk)?;
     }
     Ok(())
 }
@@ -477,6 +477,16 @@ fn map_io_error(err: std::io::Error) -> ServiceError {
 mod tests {
     use super::*;
 
+    struct VecWriteFileChunkSource {
+        chunks: std::vec::IntoIter<WriteFileChunk>,
+    }
+
+    impl WriteFileChunkSource for VecWriteFileChunkSource {
+        fn next_chunk(&mut self) -> BoxFutureResult<'_, Option<WriteFileChunk>> {
+            Box::pin(async move { Ok(self.chunks.next()) })
+        }
+    }
+
     #[tokio::test]
     async fn list_directory_tolerates_profile_entries_without_metadata() {
         let Some(profile) = std::env::var_os("USERPROFILE") else {
@@ -516,10 +526,13 @@ mod tests {
                     expected_result_size: Some(5),
                     modified_at_ms: Some(modified_at_ms),
                 },
-                vec![WriteFileChunk {
-                    offset: None,
-                    bytes: b"hello".to_vec(),
-                }],
+                Box::new(VecWriteFileChunkSource {
+                    chunks: vec![WriteFileChunk {
+                        offset: None,
+                        bytes: b"hello".to_vec(),
+                    }]
+                    .into_iter(),
+                }),
             )
             .await
             .unwrap();

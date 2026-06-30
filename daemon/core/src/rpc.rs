@@ -21,12 +21,12 @@ pub use crate::generated::rpc::{
     FsMutationError, FsMutationItemError, GetDaemonInfoError, ProcDefinition, ProcId, ProcStream,
     PurgeTrashItemsReq, ReadFileChunk, ReadFileError, ReadFileReq, RenamePathOp, RenamePathsReq,
     RenewClientCredentialError, RenewClientCredentialRes, RestoreTrashItemsReq, RootEntryKey,
-    RootsSubscriptionCloseReason, RootsTableEvent, RpcRequest, RpcRequestDecodeError, RpcResponse,
-    StartPairingError, StartPairingReq, StartPairingRes, SubscribeAvailableShellsError,
-    SubscribeClientsError, SubscribeDirectoryError, SubscribeDirectoryReq, SubscribeRootsError,
-    SubscribeTrashItemsError, TakeTerminalControlError, TakeTerminalControlReq,
-    TakeTerminalControlRes, TerminalEvent, TerminalExit, TerminalLaunchSpec,
-    TerminalSessionCloseReason, TerminalSessionInfo, TerminalSessionKey,
+    RootsSubscriptionCloseReason, RootsTableEvent, RpcHandlerFn, RpcHandlerFuture, RpcHandlers,
+    RpcRequest, RpcRequestDecodeError, RpcResponse, StartPairingError, StartPairingReq,
+    StartPairingRes, SubscribeAvailableShellsError, SubscribeClientsError, SubscribeDirectoryError,
+    SubscribeDirectoryReq, SubscribeRootsError, SubscribeTrashItemsError, TakeTerminalControlError,
+    TakeTerminalControlReq, TakeTerminalControlRes, TerminalEvent, TerminalExit,
+    TerminalLaunchSpec, TerminalSessionCloseReason, TerminalSessionInfo, TerminalSessionKey,
     TerminalSessionsTableEvent, TrashItem, TrashItemSize, TrashItemsSubscriptionCloseReason,
     TrashItemsTableEvent, WriteFileError, WriteFileMode, WriteFileResult, WriteTerminalInputError,
     PROC_DEFINITIONS,
@@ -38,34 +38,8 @@ pub type CompletePairingRequest = CompletePairingReq;
 pub type CompletePairingResponse = CompletePairingRes;
 pub type RenewClientCredentialResponse = RenewClientCredentialRes;
 
-pub const SUPPORTED_PROCS: [ProcId; 22] = [
-    ProcId::GetDaemonInfo,
-    ProcId::StartPairing,
-    ProcId::CompletePairing,
-    ProcId::RenewClientCredential,
-    ProcId::SubscribeRoots,
-    ProcId::SubscribeDirectory,
-    ProcId::ReadFile,
-    ProcId::WriteFile,
-    ProcId::CreateNodes,
-    ProcId::RenamePaths,
-    ProcId::DeletePaths,
-    ProcId::CreateTerminalSession,
-    ProcId::SubscribeTerminalSessions,
-    ProcId::SubscribeAvailableShells,
-    ProcId::AttachTerminalSession,
-    ProcId::TakeTerminalControl,
-    ProcId::WriteTerminalInput,
-    ProcId::CloseTerminalSession,
-    ProcId::SubscribeClients,
-    ProcId::SubscribeTrashItems,
-    ProcId::RestoreTrashItems,
-    ProcId::PurgeTrashItems,
-];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DaemonProcessInfo {
-    supported_proc_ids: Vec<u64>,
     version: String,
     os: String,
     instance_id: String,
@@ -76,7 +50,6 @@ impl DaemonProcessInfo {
     fn current() -> Self {
         let started_at_ms = current_unix_ms();
         Self {
-            supported_proc_ids: SUPPORTED_PROCS.into_iter().map(ProcId::as_u64).collect(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             os: current_os_name(),
             instance_id: format!("{started_at_ms}-{}", std::process::id()),
@@ -86,12 +59,12 @@ impl DaemonProcessInfo {
 }
 
 impl DaemonInfo {
-    pub fn current() -> Self {
+    pub fn current_with_supported_procs(supported_procs: &[ProcId]) -> Self {
         static PROCESS_INFO: OnceLock<DaemonProcessInfo> = OnceLock::new();
 
         let process_info = PROCESS_INFO.get_or_init(DaemonProcessInfo::current);
         Self {
-            supported_proc_ids: process_info.supported_proc_ids.clone(),
+            supported_proc_ids: supported_procs.iter().map(|proc| proc.as_u64()).collect(),
             version: process_info.version.clone(),
             os: process_info.os.clone(),
             instance_id: process_info.instance_id.clone(),
@@ -131,7 +104,7 @@ impl WriteFileReq {
         }
     }
 
-    fn from_generated(value: GeneratedWriteFileReq) -> Result<Self, RpcCodecError> {
+    pub fn from_generated(value: GeneratedWriteFileReq) -> Result<Self, RpcCodecError> {
         Ok(match value {
             GeneratedWriteFileReq::WriteFileStart {
                 path,
@@ -182,7 +155,11 @@ impl WriteTerminalInputReq {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, RpcCodecError> {
-        Ok(match GeneratedWriteTerminalInputReq::decode(bytes)? {
+        Self::from_generated(GeneratedWriteTerminalInputReq::decode(bytes)?)
+    }
+
+    pub fn from_generated(value: GeneratedWriteTerminalInputReq) -> Result<Self, RpcCodecError> {
+        Ok(match value {
             GeneratedWriteTerminalInputReq::WriteTerminalInputStart {
                 terminal_session_id,
                 attach_id,
@@ -462,18 +439,22 @@ mod tests {
     use crate::rpc::{
         CompletePairingRequest, CompletePairingResponse, DaemonInfo, DirectoryTableEvent, FsEntry,
         FsEntryKind, ReadFileChunk, RenewClientCredentialResponse, StartPairingRequest,
-        WriteFileChunk, WriteFileMode, WriteFileReq, WriteFileStart, SUPPORTED_PROCS,
+        WriteFileChunk, WriteFileMode, WriteFileReq, WriteFileStart,
     };
 
     #[test]
     fn daemon_info_roundtrip() {
-        let daemon_info = DaemonInfo::current();
+        let supported_procs = [
+            crate::rpc::ProcId::GetDaemonInfo,
+            crate::rpc::ProcId::StartPairing,
+        ];
+        let daemon_info = DaemonInfo::current_with_supported_procs(&supported_procs);
         assert_eq!(
             daemon_info.supported_proc_ids,
-            SUPPORTED_PROCS
-                .into_iter()
-                .map(crate::rpc::ProcId::as_u64)
-                .collect::<Vec<_>>()
+            supported_procs
+                .iter()
+                .map(|proc| proc.as_u64())
+                .collect::<Vec<_>>(),
         );
         assert_eq!(
             DaemonInfo::decode(&daemon_info.encode()).unwrap(),

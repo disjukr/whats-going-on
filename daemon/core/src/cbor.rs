@@ -60,6 +60,15 @@ impl Value {
         }
         Ok(values)
     }
+
+    pub fn decode_prefix(bytes: &[u8]) -> Result<Option<(Self, usize)>, CborError> {
+        let mut cursor = Cursor::new(bytes);
+        match decode_value(&mut cursor) {
+            Ok(value) => Ok(Some((value, cursor.position() as usize))),
+            Err(CborError::UnexpectedEnd) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
 }
 
 fn encode_value(value: &Value, out: &mut Vec<u8>) {

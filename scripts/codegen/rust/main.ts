@@ -791,6 +791,10 @@ function emitProcHelpers(
       out.line("}");
     });
     out.line("}");
+    out.line();
+    emitMethodErrorPayloadHelper(out, procs, named);
+    out.line();
+    emitMethodErrorVariantHelper(out, procs, named);
   });
   out.line("}");
 
@@ -798,7 +802,9 @@ function emitProcHelpers(
   out.line("#[derive(Debug, Clone, PartialEq, Eq)]");
   out.line("pub enum RpcRequest {");
   out.indent(() => {
-    for (const proc of procs) emitProcMessageVariant(out, proc, proc.input);
+    for (const proc of procs) {
+      emitProcMessageVariant(out, proc, proc.input, { voidAsUnitTuple: true });
+    }
   });
   out.line("}");
 
@@ -877,6 +883,7 @@ function emitProcHelpers(
   });
   out.line("}");
 
+  emitRpcHandlerHelpers(out, procs);
 }
 
 function procDeclarations(schema: Schema): ProcDeclaration[] {
@@ -891,9 +898,10 @@ function emitProcMessageVariant(
   out: Writer,
   proc: ProcDeclaration,
   type: TypeRef,
+  options: { voidAsUnitTuple?: boolean } = {},
 ) {
   if (type.kind === "void") {
-    out.line(`${proc.name},`);
+    out.line(options.voidAsUnitTuple ? `${proc.name}(()),` : `${proc.name},`);
   } else {
     out.line(`${proc.name}(${rustType(type)}),`);
   }
@@ -901,7 +909,7 @@ function emitProcMessageVariant(
 
 function emitRpcRequestDecodeArm(out: Writer, proc: ProcDeclaration) {
   if (proc.input.kind === "void") {
-    out.line(`ProcId::${proc.name} => Ok(Self::${proc.name}),`);
+    out.line(`ProcId::${proc.name} => Ok(Self::${proc.name}(())),`);
     return;
   }
   out.line(`ProcId::${proc.name} => {`);
@@ -925,7 +933,7 @@ function emitProcMessageProcIdArm(
   proc: ProcDeclaration,
   type: TypeRef,
 ) {
-  if (type.kind === "void") {
+  if (type.kind === "void" && enumName !== "RpcRequest") {
     out.line(`${enumName}::${proc.name} => ProcId::${proc.name},`);
   } else {
     out.line(`${enumName}::${proc.name}(..) => ProcId::${proc.name},`);
@@ -938,6 +946,209 @@ function emitRpcResponsePayloadArm(out: Writer, proc: ProcDeclaration) {
   } else {
     out.line(`Self::${proc.name}(value) => Some(value.encode()),`);
   }
+}
+
+function emitRpcHandlerHelpers(out: Writer, procs: ProcDeclaration[]) {
+  const unaryProcs = procs.filter((proc) => proc.stream === "unary");
+  const serverStreamProcs = procs.filter((proc) => proc.stream === "server");
+  const clientStreamProcs = procs.filter((proc) => proc.stream === "client");
+
+  out.line();
+  out.line("pub type RpcHandlerFuture<'a, O> = std::pin::Pin<Box<dyn std::future::Future<Output = O> + Send + 'a>>;");
+  out.line("pub type RpcHandlerFn<H, I, O> = for<'a> fn(&'a mut H, I) -> RpcHandlerFuture<'a, O>;");
+
+  out.line();
+  out.line("pub struct RpcHandlers<H, UO, SO, CO> {");
+  out.indent(() => {
+    out.line("supported_procs: Vec<ProcId>,");
+    for (const proc of procs) {
+      out.line(`${fieldName(proc.name)}: Option<${rpcHandlerFnType(proc)}>,`);
+    }
+  });
+  out.line("}");
+
+  out.line();
+  out.line("impl<H, UO, SO, CO> Default for RpcHandlers<H, UO, SO, CO> {");
+  out.indent(() => {
+    out.line("fn default() -> Self {");
+    out.indent(() => out.line("Self::new()"));
+    out.line("}");
+  });
+  out.line("}");
+
+  out.line();
+  out.line("impl<H, UO, SO, CO> RpcHandlers<H, UO, SO, CO> {");
+  out.indent(() => {
+    out.line("pub fn new() -> Self {");
+    out.indent(() => {
+      out.line("Self {");
+      out.indent(() => {
+        out.line("supported_procs: Vec::new(),");
+        for (const proc of procs) out.line(`${fieldName(proc.name)}: None,`);
+      });
+      out.line("}");
+    });
+    out.line("}");
+    out.line();
+    out.line("fn enable(&mut self, proc: ProcId) {");
+    out.indent(() => {
+      out.line("if !self.supported_procs.contains(&proc) {");
+      out.indent(() => out.line("self.supported_procs.push(proc);"));
+      out.line("}");
+    });
+    out.line("}");
+    out.line();
+    for (const proc of procs) {
+      const field = fieldName(proc.name);
+      out.line(`pub fn ${field}(mut self, handler: ${rpcHandlerFnType(proc)}) -> Self {`);
+      out.indent(() => {
+        out.line(`self.enable(ProcId::${proc.name});`);
+        out.line(`self.${field} = Some(handler);`);
+        out.line("self");
+      });
+      out.line("}");
+      out.line();
+    }
+    out.line("pub fn supported_procs(&self) -> &[ProcId] {");
+    out.indent(() => out.line("&self.supported_procs"));
+    out.line("}");
+    out.line();
+    out.line("pub fn is_supported(&self, proc: ProcId) -> bool {");
+    out.indent(() => out.line("self.supported_procs.contains(&proc)"));
+    out.line("}");
+    out.line();
+    out.line("pub fn is_supported_proc_id(&self, proc_id: u64) -> bool {");
+    out.indent(() => {
+      out.line("ProcId::from_u64(proc_id).is_some_and(|proc| self.is_supported(proc))");
+    });
+    out.line("}");
+    out.line();
+    emitRpcHandlersDispatch(out, "dispatch_unary", "UO", unaryProcs);
+    out.line();
+    emitRpcHandlersDispatch(out, "dispatch_server_stream", "SO", serverStreamProcs);
+    out.line();
+    emitRpcHandlersDispatch(out, "dispatch_client_stream", "CO", clientStreamProcs);
+  });
+  out.line("}");
+}
+
+function rpcRequestType(proc: ProcDeclaration): string {
+  return proc.input.kind === "void" ? "()" : rustType(proc.input);
+}
+
+function rpcHandlerOutputType(proc: ProcDeclaration): string {
+  if (proc.stream === "unary") return "UO";
+  if (proc.stream === "server") return "SO";
+  if (proc.stream === "client") return "CO";
+  return "UO";
+}
+
+function rpcHandlerFnType(proc: ProcDeclaration): string {
+  return `RpcHandlerFn<H, ${rpcRequestType(proc)}, ${rpcHandlerOutputType(proc)}>`;
+}
+
+function emitRpcHandlersDispatch(
+  out: Writer,
+  name: string,
+  output: string,
+  procs: ProcDeclaration[],
+) {
+  out.line(`pub async fn ${name}(&self, handler: &mut H, request: RpcRequest) -> Option<${output}> {`);
+  out.indent(() => {
+    out.line("match request {");
+    out.indent(() => {
+      for (const proc of procs) {
+        const field = fieldName(proc.name);
+        out.line(`RpcRequest::${proc.name}(request) => {`);
+        out.indent(() => {
+          out.line(`let handler_fn = self.${field}?;`);
+          out.line("Some(handler_fn(handler, request).await)");
+        });
+        out.line("}");
+      }
+      out.line("_ => None,");
+    });
+    out.line("}");
+  });
+  out.line("}");
+}
+
+function emitMethodErrorPayloadHelper(
+  out: Writer,
+  procs: ProcDeclaration[],
+  named: Map<string, Declaration>,
+) {
+  out.line("pub fn method_error_payload(self, code: &str, message: &str) -> Option<Vec<u8>> {");
+  out.indent(() => {
+    out.line("let variant_id = self.method_error_variant(code)?;");
+    out.line("Some(");
+    out.indent(() => {
+      out.line("Value::Array(vec![");
+      out.indent(() => {
+        out.line("Value::U64(variant_id),");
+        out.line("Value::Map(BTreeMap::from([(1, Value::Text(message.to_string()))])),");
+      });
+      out.line("])");
+      out.line(".encode(),");
+    });
+    out.line(")");
+  });
+  out.line("}");
+}
+
+function emitMethodErrorVariantHelper(
+  out: Writer,
+  procs: ProcDeclaration[],
+  named: Map<string, Declaration>,
+) {
+  const procsWithMethodErrors = procs.filter((proc) =>
+    methodErrorVariants(proc, named).length > 0
+  );
+  out.line("pub fn method_error_variant(self, code: &str) -> Option<u64> {");
+  out.indent(() => {
+    out.line("match self {");
+    out.indent(() => {
+      for (const proc of procsWithMethodErrors) {
+        const variants = methodErrorVariants(proc, named);
+        out.line(`Self::${proc.name} => match code {`);
+        out.indent(() => {
+          for (const variant of variants) {
+            out.line(`"${snakeCase(variant.name)}" => Some(${variant.id}),`);
+          }
+          out.line("_ => None,");
+        });
+        out.line("},");
+      }
+      if (procsWithMethodErrors.length < procs.length) out.line("_ => None,");
+    });
+    out.line("}");
+  });
+  out.line("}");
+}
+
+function methodErrorVariants(
+  proc: ProcDeclaration,
+  named: Map<string, Declaration>,
+): UnionVariantDeclaration[] {
+  if (proc.error.kind === "void") return [];
+  const declaration = getNamed(proc.error, named);
+  if (declaration.kind !== "union") {
+    throw new Error(`${proc.name} error type must be a union`);
+  }
+  for (const variant of declaration.variants) {
+    if (
+      variant.fields.length !== 1 ||
+      variant.fields[0]!.id !== 1 ||
+      variant.fields[0]!.name !== "message" ||
+      variant.fields[0]!.type.kind !== "primitive" ||
+      variant.fields[0]!.type.name !== "string"
+    ) {
+      throw new Error(
+        `${proc.name} error variant ${variant.name} must contain only @ id - 1 message: string`,
+      );
+    }
+  }
+  return declaration.variants;
 }
 
 function procStreamVariant(stream: ProcStream): string {

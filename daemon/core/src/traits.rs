@@ -9,6 +9,10 @@ use crate::rpc::{
 pub type BoxFutureResult<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ServiceError>> + Send + 'a>>;
 
+pub trait WriteFileChunkSource: Send {
+    fn next_chunk(&mut self) -> BoxFutureResult<'_, Option<WriteFileChunk>>;
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ServiceError {
     #[error("permission denied")]
@@ -33,11 +37,11 @@ pub trait FileService: Send + Sync {
     fn roots(&self) -> BoxFutureResult<'_, Vec<FsEntry>>;
     fn list_directory(&self, path: String) -> BoxFutureResult<'_, Vec<FsEntry>>;
     fn read_file(&self, request: ReadFileReq) -> BoxFutureResult<'_, Vec<u8>>;
-    fn write_file(
-        &self,
+    fn write_file<'a>(
+        &'a self,
         start: WriteFileStart,
-        chunks: Vec<WriteFileChunk>,
-    ) -> BoxFutureResult<'_, WriteFileResult>;
+        chunks: Box<dyn WriteFileChunkSource + 'a>,
+    ) -> BoxFutureResult<'a, WriteFileResult>;
     fn create_node(&self, op: CreateNodeOp) -> BoxFutureResult<'_, ()>;
     fn rename_path(&self, from: String, to: String) -> BoxFutureResult<'_, ()>;
     fn delete_path(&self, path: String, mode: DeleteMode) -> BoxFutureResult<'_, ()>;

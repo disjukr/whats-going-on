@@ -4,8 +4,8 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -16,11 +16,13 @@ use time::OffsetDateTime;
 use tokio::sync::{watch, Mutex};
 use tracing::{info, warn};
 use web_transport_quinn::proto::ConnectResponse;
-use wgo_daemon_core::cbor::Value;
 use wgo_daemon_core::config::{
     client_credentials_path, daemon_status_path, load_client_credentials_or_default,
     load_or_default, load_or_generated_default, save, save_client_credentials,
     ClientCredentialRecord, ClientCredentials, SystemConfig,
+};
+use wgo_daemon_core::generated::rpc::{
+    WriteFileReq as GeneratedWriteFileReq, WriteTerminalInputReq as GeneratedWriteTerminalInputReq,
 };
 use wgo_daemon_core::pairing::{
     create_pairing_code, issue_client_secret, reissue_client_secret, renew_client_credential,
@@ -28,16 +30,18 @@ use wgo_daemon_core::pairing::{
 };
 use wgo_daemon_core::rpc::{
     AttachTerminalSessionReq, AvailableShellsTableEvent, BulkMutationItemResult, BulkMutationRes,
-    ClientInfo, ClientKey, ClientsTableEvent, CompletePairingResponse, CreateNodesReq, DaemonInfo,
-    DeleteMode, DeletePathsReq, DirectoryEntryKey, DirectorySubscriptionCloseReason,
-    DirectoryTableEvent, FsEntry, ProcId, ProcStream, PurgeTrashItemsReq, ReadFileChunk,
-    ReadFileReq, RenamePathsReq, RenewClientCredentialResponse, RestoreTrashItemsReq, RootEntryKey,
-    RootsSubscriptionCloseReason, RootsTableEvent, RpcErrorCode, RpcErrorPayload, RpcRequest,
-    RpcRequestDecodeError, StartPairingResponse, TerminalEvent, TerminalSessionsTableEvent,
-    TrashItem, TrashItemsSubscriptionCloseReason, TrashItemsTableEvent, WriteFileReq,
-    WriteTerminalInputReq,
+    ClientInfo, ClientKey, ClientsTableEvent, CloseTerminalSessionReq, CompletePairingRequest,
+    CompletePairingResponse, CreateNodesReq, CreateTerminalSessionReq, DaemonInfo, DeleteMode,
+    DeletePathsReq, DirectoryEntryKey, DirectorySubscriptionCloseReason, DirectoryTableEvent,
+    FsEntry, ProcId, ProcStream, PurgeTrashItemsReq, ReadFileChunk, ReadFileReq, RenamePathsReq,
+    RenewClientCredentialResponse, RestoreTrashItemsReq, RootEntryKey,
+    RootsSubscriptionCloseReason, RootsTableEvent, RpcErrorCode, RpcErrorPayload, RpcHandlerFuture,
+    RpcHandlers, RpcRequest, RpcRequestDecodeError, RpcResponse, StartPairingRequest,
+    StartPairingResponse, SubscribeDirectoryReq, TakeTerminalControlReq, TerminalEvent,
+    TerminalSessionsTableEvent, TrashItem, TrashItemsSubscriptionCloseReason, TrashItemsTableEvent,
+    WriteFileChunk, WriteFileReq, WriteTerminalInputReq,
 };
-use wgo_daemon_core::traits::{FileService, ServiceError};
+use wgo_daemon_core::traits::{BoxFutureResult, FileService, ServiceError, WriteFileChunkSource};
 use wgo_daemon_core::wire::{
     DatagramMessage, PairedSecretCredential, ReqResMessage, RpcErrorKind, SessionAuthErrorCode,
     MAX_MESSAGE_SEQUENCE_SIZE, PAIRED_SECRET_AUTH_MECHANISM,
@@ -69,6 +73,7 @@ type SharedFileService = Arc<dyn FileService>;
 type SharedPairingNotifier = Arc<dyn PairingNotifier>;
 type SharedTerminalManager = Arc<TerminalManager>;
 type SharedTrashEvents = watch::Sender<u64>;
+type SharedSendStream = Arc<Mutex<web_transport_quinn::SendStream>>;
 
 static NEXT_RPC_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -792,7 +797,7 @@ async fn run_rpc_session(
     loop {
         tokio::select! {
             stream = session.accept_bi() => {
-                let (mut send, mut recv) = stream?;
+                let (send, recv) = stream?;
                 let config_path = config_path.clone();
                 let credentials_path = credentials_path.clone();
                 let config_state = config_state.clone();
@@ -806,14 +811,11 @@ async fn run_rpc_session(
                 let pairing_notifier = pairing_notifier.clone();
                 tokio::spawn(async move {
                     let response = async {
-                        let messages = read_reqres_message_sequence_from_stream(&mut recv)
-                            .await
-                            .context("invalid reqres message sequence")?;
                         handle_reqres_stream(
-                            messages,
-                            &mut send,
-                            &config_path,
-                            &credentials_path,
+                            recv,
+                            send,
+                            config_path,
+                            credentials_path,
                             config_state,
                             client_credentials,
                             client_credentials_events,
@@ -825,7 +827,6 @@ async fn run_rpc_session(
                             pairing_notifier,
                         )
                         .await?;
-                        send.finish()?;
                         Result::<()>::Ok(())
                     }
                     .await;
@@ -859,6 +860,38 @@ fn handle_wire_datagram(bytes: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+type HostRpcHandlers =
+    RpcHandlers<HostRpcHandler, Result<UnaryRpcOutcome>, Result<()>, Result<Vec<ReqResMessage>>>;
+
+fn rpc_handlers() -> &'static HostRpcHandlers {
+    static HANDLERS: OnceLock<HostRpcHandlers> = OnceLock::new();
+    HANDLERS.get_or_init(|| {
+        RpcHandlers::new()
+            .get_daemon_info(HostRpcHandler::get_daemon_info_rpc)
+            .start_pairing(HostRpcHandler::start_pairing_rpc)
+            .complete_pairing(HostRpcHandler::complete_pairing_rpc)
+            .renew_client_credential(HostRpcHandler::renew_client_credential_rpc)
+            .subscribe_roots(HostRpcHandler::subscribe_roots_rpc)
+            .subscribe_directory(HostRpcHandler::subscribe_directory_rpc)
+            .read_file(HostRpcHandler::read_file_rpc)
+            .write_file(HostRpcHandler::write_file_rpc)
+            .create_nodes(HostRpcHandler::create_nodes_rpc)
+            .rename_paths(HostRpcHandler::rename_paths_rpc)
+            .delete_paths(HostRpcHandler::delete_paths_rpc)
+            .create_terminal_session(HostRpcHandler::create_terminal_session_rpc)
+            .subscribe_terminal_sessions(HostRpcHandler::subscribe_terminal_sessions_rpc)
+            .subscribe_available_shells(HostRpcHandler::subscribe_available_shells_rpc)
+            .attach_terminal_session(HostRpcHandler::attach_terminal_session_rpc)
+            .take_terminal_control(HostRpcHandler::take_terminal_control_rpc)
+            .write_terminal_input(HostRpcHandler::write_terminal_input_rpc)
+            .close_terminal_session(HostRpcHandler::close_terminal_session_rpc)
+            .subscribe_clients(HostRpcHandler::subscribe_clients_rpc)
+            .subscribe_trash_items(HostRpcHandler::subscribe_trash_items_rpc)
+            .restore_trash_items(HostRpcHandler::restore_trash_items_rpc)
+            .purge_trash_items(HostRpcHandler::purge_trash_items_rpc)
+    })
+}
+
 fn is_server_stream_proc(proc_id: u64) -> bool {
     ProcId::from_u64(proc_id).is_some_and(|proc| proc.stream() == ProcStream::Server)
 }
@@ -867,11 +900,66 @@ fn is_client_stream_proc(proc_id: u64) -> bool {
     ProcId::from_u64(proc_id).is_some_and(|proc| proc.stream() == ProcStream::Client)
 }
 
-async fn read_reqres_message_sequence_from_stream(
-    recv: &mut web_transport_quinn::RecvStream,
+struct ReqResMessageReader {
+    recv: web_transport_quinn::RecvStream,
+    buffer: Vec<u8>,
+    bytes_read: usize,
+    finished: bool,
+}
+
+impl ReqResMessageReader {
+    fn new(recv: web_transport_quinn::RecvStream) -> Self {
+        Self {
+            recv,
+            buffer: Vec::new(),
+            bytes_read: 0,
+            finished: false,
+        }
+    }
+
+    async fn next(&mut self) -> Result<Option<ReqResMessage>> {
+        loop {
+            if let Some((message, consumed)) = ReqResMessage::decode_prefix(&self.buffer)? {
+                self.buffer.drain(..consumed);
+                return Ok(Some(message));
+            }
+            if self.finished {
+                if self.buffer.is_empty() {
+                    return Ok(None);
+                }
+                bail!("reqres message sequence ended with an incomplete message");
+            }
+            self.read_more().await?;
+        }
+    }
+
+    async fn read_more(&mut self) -> Result<()> {
+        let mut chunk = [0u8; 8192];
+        let Some(len) = self.recv.read(&mut chunk).await? else {
+            self.finished = true;
+            return Ok(());
+        };
+        if len == 0 {
+            self.finished = true;
+            return Ok(());
+        }
+        self.bytes_read += len;
+        if self.bytes_read > MAX_MESSAGE_SEQUENCE_SIZE {
+            bail!("reqres message sequence exceeds implementation limit");
+        }
+        self.buffer.extend_from_slice(&chunk[..len]);
+        Ok(())
+    }
+}
+
+async fn read_remaining_reqres_messages(
+    reader: &mut ReqResMessageReader,
 ) -> Result<Vec<ReqResMessage>> {
-    let bytes = recv.read_to_end(MAX_MESSAGE_SEQUENCE_SIZE).await?;
-    ReqResMessage::decode_sequence(&bytes).map_err(Into::into)
+    let mut messages = Vec::new();
+    while let Some(message) = reader.next().await? {
+        messages.push(message);
+    }
+    Ok(messages)
 }
 
 #[cfg(test)]
@@ -906,6 +994,7 @@ async fn handle_reqres_messages(
     .await
 }
 
+#[cfg(test)]
 async fn handle_reqres_messages_with_events(
     messages: Vec<ReqResMessage>,
     config_path: &Path,
@@ -920,39 +1009,27 @@ async fn handle_reqres_messages_with_events(
     trash_events: SharedTrashEvents,
     pairing_notifier: Option<SharedPairingNotifier>,
 ) -> Result<Vec<ReqResMessage>> {
-    let Some(first) = messages.first() else {
-        return Ok(vec![generic_error_message(
-            0,
-            RpcErrorCode::BadMessage,
-            "reqres message sequence is empty",
-        )]);
+    let context = HostRpcContext {
+        config_path: config_path.to_path_buf(),
+        credentials_path: credentials_path.to_path_buf(),
+        config_state,
+        client_credentials,
+        client_credentials_events,
+        pairing_challenge,
+        session_state,
+        files,
+        terminals,
+        trash_events,
+        pairing_notifier,
     };
-    if first.is_session_control() {
-        handle_session_control_messages(messages, client_credentials, session_state).await
-    } else {
-        handle_rpc_messages_with_events(
-            messages,
-            config_path,
-            credentials_path,
-            config_state,
-            client_credentials,
-            client_credentials_events,
-            pairing_challenge,
-            session_state,
-            files,
-            terminals,
-            trash_events,
-            pairing_notifier,
-        )
-        .await
-    }
+    dispatch_buffered_reqres_invocation(messages, context).await
 }
 
 async fn handle_reqres_stream(
-    messages: Vec<ReqResMessage>,
-    send: &mut web_transport_quinn::SendStream,
-    config_path: &Path,
-    credentials_path: &Path,
+    recv: web_transport_quinn::RecvStream,
+    mut send: web_transport_quinn::SendStream,
+    config_path: PathBuf,
+    credentials_path: PathBuf,
     config_state: SharedSystemConfig,
     client_credentials: SharedClientCredentials,
     client_credentials_events: SharedClientCredentialsEvents,
@@ -963,34 +1040,7 @@ async fn handle_reqres_stream(
     trash_events: SharedTrashEvents,
     pairing_notifier: Option<SharedPairingNotifier>,
 ) -> Result<()> {
-    if let Some((proc_id, payload)) = request_unary_parts(&messages) {
-        if is_server_stream_proc(proc_id) {
-            return handle_server_stream(
-                proc_id,
-                payload,
-                send,
-                config_state,
-                client_credentials_events,
-                session_state,
-                files,
-                terminals,
-                trash_events,
-            )
-            .await;
-        }
-    }
-
-    if matches!(
-        messages.first(),
-        Some(ReqResMessage::RequestStreamStart { .. })
-    ) {
-        let responses =
-            handle_client_stream_messages(messages, session_state, files, terminals).await?;
-        return write_reqres_messages(send, &responses).await;
-    }
-
-    let responses = handle_reqres_messages_with_events(
-        messages,
+    let context = HostRpcContext {
         config_path,
         credentials_path,
         config_state,
@@ -1002,35 +1052,221 @@ async fn handle_reqres_stream(
         terminals,
         trash_events,
         pairing_notifier,
-    )
-    .await?;
-    write_reqres_messages(send, &responses).await
+    };
+    let mut reader = ReqResMessageReader::new(recv);
+    let Some(first) = reader.next().await.context("invalid reqres message")? else {
+        write_reqres_message(
+            &mut send,
+            generic_error_message(
+                0,
+                RpcErrorCode::BadMessage,
+                "reqres message sequence is empty",
+            ),
+        )
+        .await?;
+        return Ok(());
+    };
+
+    match first {
+        message if message.is_session_control() => {
+            let mut messages = vec![message];
+            messages.extend(read_remaining_reqres_messages(&mut reader).await?);
+            let responses = handle_session_control_messages(
+                messages,
+                context.client_credentials,
+                context.session_state,
+            )
+            .await?;
+            write_reqres_messages(&mut send, &responses).await
+        }
+        ReqResMessage::RequestUnary { proc_id, payload } if is_server_stream_proc(proc_id) => {
+            let shared_send = Arc::new(Mutex::new(send));
+            dispatch_server_stream_rpc(proc_id, payload, shared_send.clone(), context).await?;
+            shared_send.lock().await.finish()?;
+            Ok(())
+        }
+        ReqResMessage::RequestUnary { proc_id, payload } => {
+            if reader.next().await?.is_some() {
+                write_reqres_message(
+                    &mut send,
+                    generic_error_message(
+                        proc_id,
+                        RpcErrorCode::BadMessage,
+                        "unary request sequence may contain only one message",
+                    ),
+                )
+                .await?;
+                return Ok(());
+            }
+            let responses = dispatch_unary_rpc(proc_id, payload, context).await?;
+            write_reqres_messages(&mut send, &responses).await?;
+            send.finish()?;
+            Ok(())
+        }
+        ReqResMessage::RequestStreamStart { proc_id, payload } => {
+            let responses = dispatch_client_stream_rpc(
+                proc_id,
+                payload,
+                RequestStreamSource::Live(reader),
+                context,
+            )
+            .await?;
+            write_reqres_messages(&mut send, &responses).await?;
+            send.finish()?;
+            Ok(())
+        }
+        _ => {
+            write_reqres_message(
+                &mut send,
+                generic_error_message(
+                    0,
+                    RpcErrorCode::BadMessage,
+                    "reqres stream must start with a request message",
+                ),
+            )
+            .await?;
+            send.finish()?;
+            Ok(())
+        }
+    }
 }
 
-fn request_unary_parts(messages: &[ReqResMessage]) -> Option<(u64, Option<Vec<u8>>)> {
-    if messages.len() != 1 {
-        return None;
-    }
-    match &messages[0] {
-        ReqResMessage::RequestUnary { proc_id, payload } => Some((*proc_id, payload.clone())),
-        _ => None,
-    }
-}
-
-async fn handle_server_stream(
-    proc_id: u64,
-    payload: Option<Vec<u8>>,
-    send: &mut web_transport_quinn::SendStream,
-    _config_state: SharedSystemConfig,
+#[derive(Clone)]
+struct HostRpcContext {
+    config_path: PathBuf,
+    credentials_path: PathBuf,
+    config_state: SharedSystemConfig,
+    client_credentials: SharedClientCredentials,
     client_credentials_events: SharedClientCredentialsEvents,
+    pairing_challenge: SharedPairingChallenge,
     session_state: SharedRpcSessionState,
     files: SharedFileService,
     terminals: SharedTerminalManager,
     trash_events: SharedTrashEvents,
+    pairing_notifier: Option<SharedPairingNotifier>,
+}
+
+#[cfg(test)]
+enum ReqResInvocation {
+    SessionControl(Vec<ReqResMessage>),
+    Unary {
+        proc_id: u64,
+        payload: Option<Vec<u8>>,
+    },
+    ServerStream {
+        proc_id: u64,
+    },
+    ClientStream {
+        proc_id: u64,
+        payload: Option<Vec<u8>>,
+        chunks: Vec<ReqResMessage>,
+    },
+}
+
+#[cfg(test)]
+fn parse_reqres_invocation(
+    mut messages: Vec<ReqResMessage>,
+) -> Result<ReqResInvocation, Vec<ReqResMessage>> {
+    let Some(first) = messages.first() else {
+        return Err(vec![generic_error_message(
+            0,
+            RpcErrorCode::BadMessage,
+            "reqres message sequence is empty",
+        )]);
+    };
+    if first.is_session_control() {
+        return Ok(ReqResInvocation::SessionControl(messages));
+    }
+
+    match messages.remove(0) {
+        ReqResMessage::RequestUnary { proc_id, payload } => {
+            if !messages.is_empty() {
+                return Err(vec![generic_error_message(
+                    proc_id,
+                    RpcErrorCode::BadMessage,
+                    "unary request sequence may contain only one message",
+                )]);
+            }
+            if is_server_stream_proc(proc_id) {
+                Ok(ReqResInvocation::ServerStream { proc_id })
+            } else {
+                Ok(ReqResInvocation::Unary { proc_id, payload })
+            }
+        }
+        ReqResMessage::RequestStreamStart { proc_id, payload } => {
+            Ok(ReqResInvocation::ClientStream {
+                proc_id,
+                payload,
+                chunks: messages,
+            })
+        }
+        _ => Err(vec![generic_error_message(
+            0,
+            RpcErrorCode::BadMessage,
+            "reqres stream must start with a request message",
+        )]),
+    }
+}
+
+#[cfg(test)]
+async fn dispatch_buffered_reqres_invocation(
+    messages: Vec<ReqResMessage>,
+    context: HostRpcContext,
+) -> Result<Vec<ReqResMessage>> {
+    match parse_reqres_invocation(messages) {
+        Ok(invocation) => dispatch_buffered_invocation(invocation, context).await,
+        Err(responses) => Ok(responses),
+    }
+}
+
+#[cfg(test)]
+async fn dispatch_buffered_invocation(
+    invocation: ReqResInvocation,
+    context: HostRpcContext,
+) -> Result<Vec<ReqResMessage>> {
+    match invocation {
+        ReqResInvocation::SessionControl(messages) => {
+            handle_session_control_messages(
+                messages,
+                context.client_credentials,
+                context.session_state,
+            )
+            .await
+        }
+        ReqResInvocation::Unary { proc_id, payload } => {
+            dispatch_unary_rpc(proc_id, payload, context).await
+        }
+        ReqResInvocation::ClientStream {
+            proc_id,
+            payload,
+            chunks,
+        } => {
+            dispatch_client_stream_rpc(
+                proc_id,
+                payload,
+                RequestStreamSource::Buffered(chunks.into_iter()),
+                context,
+            )
+            .await
+        }
+        ReqResInvocation::ServerStream { proc_id, .. } => Ok(vec![stream_generic_error_message(
+            proc_id,
+            RpcErrorCode::BadMessage,
+            "server-streaming RPCs must be handled by the reqres stream handler",
+        )]),
+    }
+}
+
+async fn dispatch_server_stream_rpc(
+    proc_id: u64,
+    payload: Option<Vec<u8>>,
+    send: SharedSendStream,
+    context: HostRpcContext,
 ) -> Result<()> {
-    if requires_authentication(proc_id) && !is_authenticated(&session_state).await {
+    if requires_authentication(proc_id) && !is_authenticated(&context.session_state).await {
+        let mut send = send.lock().await;
         write_reqres_message(
-            send,
+            &mut send,
             stream_generic_error_message(
                 proc_id,
                 RpcErrorCode::Unauthorized,
@@ -1041,76 +1277,46 @@ async fn handle_server_stream(
         return Ok(());
     }
 
-    if proc_id == ProcId::ReadFile.as_u64() {
-        return stream_read_file(send, files, proc_id, payload).await;
-    }
-
-    if proc_id == ProcId::SubscribeRoots.as_u64() {
-        return stream_roots_subscription(send, files.clone(), proc_id).await;
-    }
-
-    if proc_id == ProcId::SubscribeTrashItems.as_u64() {
-        return stream_trash_items_subscription(send, files.clone(), trash_events, proc_id).await;
-    }
-
-    if proc_id == ProcId::SubscribeTerminalSessions.as_u64() {
-        return stream_terminal_sessions_subscription(send, terminals, proc_id).await;
-    }
-
-    if proc_id == ProcId::SubscribeAvailableShells.as_u64() {
-        return stream_available_shells_subscription(send, terminals, proc_id).await;
-    }
-
-    if proc_id == ProcId::SubscribeClients.as_u64() {
-        return stream_clients_subscription(send, client_credentials_events).await;
-    }
-
-    if proc_id == ProcId::AttachTerminalSession.as_u64() {
-        return stream_attach_terminal_session(send, terminals, session_state, proc_id, payload)
-            .await;
-    }
-
-    let Some(payload) = payload else {
-        write_reqres_message(
-            send,
-            stream_generic_error_message(
-                proc_id,
-                RpcErrorCode::MissingPayload,
-                "SubscribeDirectory requires a payload",
-            ),
-        )
-        .await?;
-        return Ok(());
-    };
-    let request = match wgo_daemon_core::rpc::SubscribeDirectoryReq::decode(&payload) {
+    let payload = payload.as_deref();
+    let request = match RpcRequest::decode(proc_id, payload) {
         Ok(request) => request,
-        Err(_) => {
+        Err(err) => {
+            let mut send = send.lock().await;
             write_reqres_message(
-                send,
-                stream_generic_error_message(
-                    proc_id,
-                    RpcErrorCode::MalformedPayload,
-                    "SubscribeDirectory payload is malformed",
-                ),
+                &mut send,
+                stream_rpc_request_decode_error_message(proc_id, err),
             )
             .await?;
             return Ok(());
         }
     };
-    stream_directory_subscription(send, files, proc_id, request.path).await
+    let request_proc_id = request.proc_id().as_u64();
+    let mut handler = HostRpcHandler::new(context, Some(send.clone()), None);
+    let Some(result) = rpc_handlers()
+        .dispatch_server_stream(&mut handler, request)
+        .await
+    else {
+        let mut send = send.lock().await;
+        write_reqres_message(
+            &mut send,
+            stream_error_message(
+                request_proc_id,
+                "not_implemented",
+                "this RPC is reserved but not implemented in the first cut",
+            ),
+        )
+        .await?;
+        return Ok(());
+    };
+    result
 }
 
-async fn handle_client_stream_messages(
-    mut messages: Vec<ReqResMessage>,
-    session_state: SharedRpcSessionState,
-    files: SharedFileService,
-    terminals: SharedTerminalManager,
+async fn dispatch_client_stream_rpc(
+    proc_id: u64,
+    payload: Option<Vec<u8>>,
+    request_stream: RequestStreamSource,
+    context: HostRpcContext,
 ) -> Result<Vec<ReqResMessage>> {
-    let (proc_id, payload) = match messages.remove(0) {
-        ReqResMessage::RequestStreamStart { proc_id, payload } => (proc_id, payload),
-        _ => unreachable!("caller checks the first message"),
-    };
-
     if !is_client_stream_proc(proc_id) {
         return Ok(vec![generic_error_message(
             proc_id,
@@ -1118,45 +1324,274 @@ async fn handle_client_stream_messages(
             "this RPC does not accept a request stream",
         )]);
     }
-    if requires_authentication(proc_id) && !is_authenticated(&session_state).await {
+    if requires_authentication(proc_id) && !is_authenticated(&context.session_state).await {
         return Ok(vec![unauthorized_message(proc_id)]);
     }
-    if proc_id == ProcId::WriteFile.as_u64() {
-        return handle_write_file_stream(proc_id, payload, messages, files).await;
+    let request = match RpcRequest::decode(proc_id, payload.as_deref()) {
+        Ok(request) => request,
+        Err(err) => return Ok(vec![rpc_request_decode_error_message(proc_id, err)]),
+    };
+    let request_proc_id = request.proc_id().as_u64();
+    let mut handler = HostRpcHandler::new(context, None, Some(request_stream));
+    let Some(result) = rpc_handlers()
+        .dispatch_client_stream(&mut handler, request)
+        .await
+    else {
+        return Ok(vec![error_message(
+            request_proc_id,
+            "not_implemented",
+            "this RPC is reserved but not implemented in the first cut",
+        )]);
+    };
+    result
+}
+
+struct HostRpcHandler {
+    config_path: PathBuf,
+    credentials_path: PathBuf,
+    config_state: SharedSystemConfig,
+    client_credentials: SharedClientCredentials,
+    client_credentials_events: SharedClientCredentialsEvents,
+    pairing_challenge: SharedPairingChallenge,
+    session_state: SharedRpcSessionState,
+    files: SharedFileService,
+    terminals: SharedTerminalManager,
+    trash_events: SharedTrashEvents,
+    pairing_notifier: Option<SharedPairingNotifier>,
+    send: Option<SharedSendStream>,
+    request_stream: Option<RequestStreamSource>,
+}
+
+enum RequestStreamSource {
+    Live(ReqResMessageReader),
+    #[cfg(test)]
+    Buffered(std::vec::IntoIter<ReqResMessage>),
+}
+
+impl RequestStreamSource {
+    async fn next(&mut self) -> Result<Option<ReqResMessage>> {
+        match self {
+            Self::Live(reader) => reader.next().await,
+            #[cfg(test)]
+            Self::Buffered(messages) => Ok(messages.next()),
+        }
     }
-    if proc_id == ProcId::WriteTerminalInput.as_u64() {
-        return handle_write_terminal_input_stream(
-            proc_id,
-            payload,
-            messages,
+}
+
+impl HostRpcHandler {
+    fn new(
+        context: HostRpcContext,
+        send: Option<SharedSendStream>,
+        request_stream: Option<RequestStreamSource>,
+    ) -> Self {
+        HostRpcHandler {
+            config_path: context.config_path,
+            credentials_path: context.credentials_path,
+            config_state: context.config_state,
+            client_credentials: context.client_credentials,
+            client_credentials_events: context.client_credentials_events,
+            pairing_challenge: context.pairing_challenge,
+            session_state: context.session_state,
+            files: context.files,
+            terminals: context.terminals,
+            trash_events: context.trash_events,
+            pairing_notifier: context.pairing_notifier,
+            send,
+            request_stream,
+        }
+    }
+
+    fn response_stream(&self) -> SharedSendStream {
+        self.send
+            .as_ref()
+            .expect("server-stream RPC requires a response stream")
+            .clone()
+    }
+
+    async fn next_request_stream_chunk(&mut self) -> Result<Option<Vec<u8>>> {
+        let Some(source) = self.request_stream.as_mut() else {
+            bail!("client-stream RPC requires a request stream");
+        };
+        match source.next().await? {
+            Some(ReqResMessage::RequestStreamChunk { payload }) => Ok(Some(payload)),
+            Some(_) => bail!("client-stream RPC received a non-chunk request message"),
+            None => Ok(None),
+        }
+    }
+}
+
+impl HostRpcHandler {
+    async fn subscribe_roots(&mut self, _: ()) -> Result<()> {
+        let files = self.files.clone();
+        let send = self.response_stream();
+        let mut send = send.lock().await;
+        stream_roots_subscription(&mut send, files, ProcId::SubscribeRoots.as_u64()).await
+    }
+
+    async fn subscribe_directory(&mut self, request: SubscribeDirectoryReq) -> Result<()> {
+        let files = self.files.clone();
+        let send = self.response_stream();
+        let mut send = send.lock().await;
+        stream_directory_subscription(
+            &mut send,
+            files,
+            ProcId::SubscribeDirectory.as_u64(),
+            request.path,
+        )
+        .await
+    }
+
+    async fn read_file(&mut self, request: ReadFileReq) -> Result<()> {
+        let files = self.files.clone();
+        let send = self.response_stream();
+        let mut send = send.lock().await;
+        stream_read_file(&mut send, files, ProcId::ReadFile.as_u64(), request).await
+    }
+
+    async fn subscribe_terminal_sessions(&mut self, _: ()) -> Result<()> {
+        let terminals = self.terminals.clone();
+        let send = self.response_stream();
+        let mut send = send.lock().await;
+        stream_terminal_sessions_subscription(
+            &mut send,
+            terminals,
+            ProcId::SubscribeTerminalSessions.as_u64(),
+        )
+        .await
+    }
+
+    async fn subscribe_available_shells(&mut self, _: ()) -> Result<()> {
+        let terminals = self.terminals.clone();
+        let send = self.response_stream();
+        let mut send = send.lock().await;
+        stream_available_shells_subscription(
+            &mut send,
+            terminals,
+            ProcId::SubscribeAvailableShells.as_u64(),
+        )
+        .await
+    }
+
+    async fn attach_terminal_session(&mut self, request: AttachTerminalSessionReq) -> Result<()> {
+        let terminals = self.terminals.clone();
+        let session_state = self.session_state.clone();
+        let send = self.response_stream();
+        let mut send = send.lock().await;
+        stream_attach_terminal_session(
+            &mut send,
             terminals,
             session_state,
+            ProcId::AttachTerminalSession.as_u64(),
+            request,
         )
-        .await;
+        .await
     }
-    Ok(vec![generic_error_message(
-        proc_id,
-        RpcErrorCode::NotImplemented,
-        "client-streaming RPC is not implemented",
-    )])
+
+    async fn subscribe_clients(&mut self, _: ()) -> Result<()> {
+        let client_credentials_events = self.client_credentials_events.clone();
+        let send = self.response_stream();
+        let mut send = send.lock().await;
+        stream_clients_subscription(&mut send, client_credentials_events).await
+    }
+
+    async fn subscribe_trash_items(&mut self, _: ()) -> Result<()> {
+        let files = self.files.clone();
+        let trash_events = self.trash_events.clone();
+        let send = self.response_stream();
+        let mut send = send.lock().await;
+        stream_trash_items_subscription(
+            &mut send,
+            files,
+            trash_events,
+            ProcId::SubscribeTrashItems.as_u64(),
+        )
+        .await
+    }
+    fn subscribe_roots_rpc<'a>(&'a mut self, request: ()) -> RpcHandlerFuture<'a, Result<()>> {
+        Box::pin(self.subscribe_roots(request))
+    }
+
+    fn subscribe_directory_rpc<'a>(
+        &'a mut self,
+        request: SubscribeDirectoryReq,
+    ) -> RpcHandlerFuture<'a, Result<()>> {
+        Box::pin(self.subscribe_directory(request))
+    }
+
+    fn read_file_rpc<'a>(&'a mut self, request: ReadFileReq) -> RpcHandlerFuture<'a, Result<()>> {
+        Box::pin(self.read_file(request))
+    }
+
+    fn subscribe_terminal_sessions_rpc<'a>(
+        &'a mut self,
+        request: (),
+    ) -> RpcHandlerFuture<'a, Result<()>> {
+        Box::pin(self.subscribe_terminal_sessions(request))
+    }
+
+    fn subscribe_available_shells_rpc<'a>(
+        &'a mut self,
+        request: (),
+    ) -> RpcHandlerFuture<'a, Result<()>> {
+        Box::pin(self.subscribe_available_shells(request))
+    }
+
+    fn attach_terminal_session_rpc<'a>(
+        &'a mut self,
+        request: AttachTerminalSessionReq,
+    ) -> RpcHandlerFuture<'a, Result<()>> {
+        Box::pin(self.attach_terminal_session(request))
+    }
+
+    fn subscribe_clients_rpc<'a>(&'a mut self, request: ()) -> RpcHandlerFuture<'a, Result<()>> {
+        Box::pin(self.subscribe_clients(request))
+    }
+
+    fn subscribe_trash_items_rpc<'a>(
+        &'a mut self,
+        request: (),
+    ) -> RpcHandlerFuture<'a, Result<()>> {
+        Box::pin(self.subscribe_trash_items(request))
+    }
+}
+
+impl HostRpcHandler {
+    async fn write_file(&mut self, request: GeneratedWriteFileReq) -> Result<Vec<ReqResMessage>> {
+        let request = WriteFileReq::from_generated(request)?;
+        handle_write_file_stream(ProcId::WriteFile.as_u64(), request, self).await
+    }
+
+    async fn write_terminal_input(
+        &mut self,
+        request: GeneratedWriteTerminalInputReq,
+    ) -> Result<Vec<ReqResMessage>> {
+        let request = WriteTerminalInputReq::from_generated(request)?;
+        handle_write_terminal_input_stream(ProcId::WriteTerminalInput.as_u64(), request, self).await
+    }
+
+    fn write_file_rpc<'a>(
+        &'a mut self,
+        request: GeneratedWriteFileReq,
+    ) -> RpcHandlerFuture<'a, Result<Vec<ReqResMessage>>> {
+        Box::pin(self.write_file(request))
+    }
+
+    fn write_terminal_input_rpc<'a>(
+        &'a mut self,
+        request: GeneratedWriteTerminalInputReq,
+    ) -> RpcHandlerFuture<'a, Result<Vec<ReqResMessage>>> {
+        Box::pin(self.write_terminal_input(request))
+    }
 }
 
 async fn handle_write_file_stream(
     proc_id: u64,
-    payload: Option<Vec<u8>>,
-    messages: Vec<ReqResMessage>,
-    files: SharedFileService,
+    request: WriteFileReq,
+    handler: &mut HostRpcHandler,
 ) -> Result<Vec<ReqResMessage>> {
-    let Some(payload) = payload else {
-        return Ok(vec![generic_error_message(
-            proc_id,
-            RpcErrorCode::MissingPayload,
-            "WriteFile requires a WriteFileStart payload",
-        )]);
-    };
-    let start = match WriteFileReq::decode(&payload) {
-        Ok(WriteFileReq::Start(start)) => start,
-        Ok(WriteFileReq::Chunk(_)) | Err(_) => {
+    let start = match request {
+        WriteFileReq::Start(start) => start,
+        WriteFileReq::Chunk(_) => {
             return Ok(vec![generic_error_message(
                 proc_id,
                 RpcErrorCode::MalformedPayload,
@@ -1165,54 +1600,64 @@ async fn handle_write_file_stream(
         }
     };
 
-    let mut chunks = Vec::new();
-    for message in messages {
-        let ReqResMessage::RequestStreamChunk { payload } = message else {
+    let files = handler.files.clone();
+    let malformed_chunk = Arc::new(AtomicBool::new(false));
+    let chunks = HostWriteFileChunkSource {
+        handler,
+        malformed_chunk: malformed_chunk.clone(),
+    };
+    let result = match files.write_file(start, Box::new(chunks)).await {
+        Ok(result) => result,
+        Err(_) if malformed_chunk.load(Ordering::Relaxed) => {
             return Ok(vec![generic_error_message(
                 proc_id,
-                RpcErrorCode::BadMessage,
-                "WriteFile request stream may contain only RequestStreamChunk after start",
+                RpcErrorCode::MalformedPayload,
+                "WriteFile chunk payload must be WriteFileChunk",
             )]);
-        };
-        match WriteFileReq::decode(&payload) {
-            Ok(WriteFileReq::Chunk(chunk)) => chunks.push(chunk),
-            Ok(WriteFileReq::Start(_)) | Err(_) => {
-                return Ok(vec![generic_error_message(
-                    proc_id,
-                    RpcErrorCode::MalformedPayload,
-                    "WriteFile chunk payload must be WriteFileChunk",
-                )]);
-            }
         }
-    }
-
-    let result = match files.write_file(start, chunks).await {
-        Ok(result) => result,
         Err(err) => return Ok(vec![service_error_message(proc_id, err)]),
     };
     Ok(vec![ok_payload_message(proc_id, result.encode())])
 }
 
+struct HostWriteFileChunkSource<'a> {
+    handler: &'a mut HostRpcHandler,
+    malformed_chunk: Arc<AtomicBool>,
+}
+
+impl WriteFileChunkSource for HostWriteFileChunkSource<'_> {
+    fn next_chunk(&mut self) -> BoxFutureResult<'_, Option<WriteFileChunk>> {
+        Box::pin(async move {
+            let Some(payload) = self
+                .handler
+                .next_request_stream_chunk()
+                .await
+                .map_err(|err| ServiceError::OperationFailed(err.to_string()))?
+            else {
+                return Ok(None);
+            };
+            match WriteFileReq::decode(&payload) {
+                Ok(WriteFileReq::Chunk(chunk)) => Ok(Some(chunk)),
+                Ok(WriteFileReq::Start(_)) | Err(_) => {
+                    self.malformed_chunk.store(true, Ordering::Relaxed);
+                    Err(ServiceError::InvalidPath)
+                }
+            }
+        })
+    }
+}
+
 async fn handle_write_terminal_input_stream(
     proc_id: u64,
-    payload: Option<Vec<u8>>,
-    messages: Vec<ReqResMessage>,
-    terminals: SharedTerminalManager,
-    session_state: SharedRpcSessionState,
+    request: WriteTerminalInputReq,
+    handler: &mut HostRpcHandler,
 ) -> Result<Vec<ReqResMessage>> {
-    let Some(payload) = payload else {
-        return Ok(vec![generic_error_message(
-            proc_id,
-            RpcErrorCode::MissingPayload,
-            "WriteTerminalInput requires a WriteTerminalInputStart payload",
-        )]);
-    };
-    let (terminal_session_id, attach_id) = match WriteTerminalInputReq::decode(&payload) {
-        Ok(WriteTerminalInputReq::Start {
+    let (terminal_session_id, attach_id) = match request {
+        WriteTerminalInputReq::Start {
             terminal_session_id,
             attach_id,
-        }) => (terminal_session_id, attach_id),
-        Ok(WriteTerminalInputReq::Chunk { .. }) | Err(_) => {
+        } => (terminal_session_id, attach_id),
+        WriteTerminalInputReq::Chunk { .. } => {
             return Ok(vec![generic_error_message(
                 proc_id,
                 RpcErrorCode::MalformedPayload,
@@ -1220,16 +1665,9 @@ async fn handle_write_terminal_input_stream(
             )]);
         }
     };
-    let rpc_session_id = rpc_session_id(&session_state).await;
+    let rpc_session_id = rpc_session_id(&handler.session_state).await;
 
-    for message in messages {
-        let ReqResMessage::RequestStreamChunk { payload } = message else {
-            return Ok(vec![generic_error_message(
-                proc_id,
-                RpcErrorCode::BadMessage,
-                "WriteTerminalInput request stream may contain only RequestStreamChunk after start",
-            )]);
-        };
+    while let Some(payload) = handler.next_request_stream_chunk().await? {
         let bytes = match WriteTerminalInputReq::decode(&payload) {
             Ok(WriteTerminalInputReq::Chunk { bytes }) => bytes,
             Ok(WriteTerminalInputReq::Start { .. }) | Err(_) => {
@@ -1241,7 +1679,9 @@ async fn handle_write_terminal_input_stream(
             }
         };
         if let Err(err) =
-            terminals.write_input(&terminal_session_id, &attach_id, &bytes, rpc_session_id)
+            handler
+                .terminals
+                .write_input(&terminal_session_id, &attach_id, &bytes, rpc_session_id)
         {
             return Ok(vec![terminal_service_error_message(proc_id, err)]);
         }
@@ -1254,35 +1694,8 @@ async fn stream_read_file(
     send: &mut web_transport_quinn::SendStream,
     files: SharedFileService,
     proc_id: u64,
-    payload: Option<Vec<u8>>,
+    request: ReadFileReq,
 ) -> Result<()> {
-    let Some(payload) = payload else {
-        write_reqres_message(
-            send,
-            stream_generic_error_message(
-                proc_id,
-                RpcErrorCode::MissingPayload,
-                "ReadFile requires a payload",
-            ),
-        )
-        .await?;
-        return Ok(());
-    };
-    let request = match ReadFileReq::decode(&payload) {
-        Ok(request) => request,
-        Err(_) => {
-            write_reqres_message(
-                send,
-                stream_generic_error_message(
-                    proc_id,
-                    RpcErrorCode::MalformedPayload,
-                    "ReadFile payload is malformed",
-                ),
-            )
-            .await?;
-            return Ok(());
-        }
-    };
     let start_offset = request.offset.unwrap_or(0);
     let bytes = match files.read_file(request).await {
         Ok(bytes) => bytes,
@@ -1407,35 +1820,8 @@ async fn stream_attach_terminal_session(
     terminals: SharedTerminalManager,
     session_state: SharedRpcSessionState,
     proc_id: u64,
-    payload: Option<Vec<u8>>,
+    request: AttachTerminalSessionReq,
 ) -> Result<()> {
-    let Some(payload) = payload else {
-        write_reqres_message(
-            send,
-            stream_generic_error_message(
-                proc_id,
-                RpcErrorCode::MissingPayload,
-                "AttachTerminalSession requires a payload",
-            ),
-        )
-        .await?;
-        return Ok(());
-    };
-    let request = match AttachTerminalSessionReq::decode(&payload) {
-        Ok(request) => request,
-        Err(_) => {
-            write_reqres_message(
-                send,
-                stream_generic_error_message(
-                    proc_id,
-                    RpcErrorCode::MalformedPayload,
-                    "AttachTerminalSession payload is malformed",
-                ),
-            )
-            .await?;
-            return Ok(());
-        }
-    };
     let rpc_session_id = rpc_session_id(&session_state).await;
     let mut attached = match terminals.attach(request, rpc_session_id) {
         Ok(attached) => attached,
@@ -1958,8 +2344,9 @@ async fn handle_rpc_messages(
     .await
 }
 
+#[cfg(test)]
 async fn handle_rpc_messages_with_events(
-    mut messages: Vec<ReqResMessage>,
+    messages: Vec<ReqResMessage>,
     config_path: &Path,
     credentials_path: &Path,
     config_state: SharedSystemConfig,
@@ -1972,317 +2359,469 @@ async fn handle_rpc_messages_with_events(
     trash_events: SharedTrashEvents,
     pairing_notifier: Option<SharedPairingNotifier>,
 ) -> Result<Vec<ReqResMessage>> {
-    if messages.len() != 1 {
-        return Ok(vec![generic_error_message(
-            0,
-            RpcErrorCode::BadMessage,
-            "RPC handler expects exactly one request message",
-        )]);
-    }
-    let (proc_id, payload) = match messages.remove(0) {
-        ReqResMessage::RequestUnary { proc_id, payload } => (proc_id, payload),
-        _ => {
-            return Ok(vec![generic_error_message(
-                0,
-                RpcErrorCode::BadMessage,
-                "RPC handler expects RequestUnary",
-            )]);
-        }
+    let context = HostRpcContext {
+        config_path: config_path.to_path_buf(),
+        credentials_path: credentials_path.to_path_buf(),
+        config_state,
+        client_credentials,
+        client_credentials_events,
+        pairing_challenge,
+        session_state,
+        files,
+        terminals,
+        trash_events,
+        pairing_notifier,
     };
-    let payload = payload.as_deref();
-    if is_server_stream_proc(proc_id) {
-        return Ok(vec![stream_generic_error_message(
-            proc_id,
-            RpcErrorCode::BadMessage,
-            "server-streaming RPCs must be handled by the reqres stream handler",
-        )]);
-    }
-    if requires_authentication(proc_id) && !is_authenticated(&session_state).await {
+    dispatch_buffered_reqres_invocation(messages, context).await
+}
+
+async fn dispatch_unary_rpc(
+    proc_id: u64,
+    payload: Option<Vec<u8>>,
+    context: HostRpcContext,
+) -> Result<Vec<ReqResMessage>> {
+    if requires_authentication(proc_id) && !is_authenticated(&context.session_state).await {
         return Ok(vec![unauthorized_message(proc_id)]);
     }
-    let request = match RpcRequest::decode(proc_id, payload) {
+    let request = match RpcRequest::decode(proc_id, payload.as_deref()) {
         Ok(request) => request,
         Err(err) => return Ok(vec![rpc_request_decode_error_message(proc_id, err)]),
     };
+    let request_proc_id = request.proc_id().as_u64();
+    let mut handler = HostRpcHandler::new(context, None, None);
+    let Some(outcome) = rpc_handlers().dispatch_unary(&mut handler, request).await else {
+        return Ok(vec![error_message(
+            request_proc_id,
+            "not_implemented",
+            "this RPC is reserved but not implemented in the first cut",
+        )]);
+    };
+    Ok(vec![outcome?.into_message()])
+}
 
-    let response = match request {
-        RpcRequest::GetDaemonInfo => ok_payload_message(proc_id, DaemonInfo::current().encode()),
-        RpcRequest::StartPairing(request) => {
-            let Some(confirmation_code) = normalize_confirmation_code(&request.confirmation_code)
-            else {
-                return Ok(vec![generic_error_message(
-                    proc_id,
-                    RpcErrorCode::MalformedPayload,
-                    "StartPairing confirmationCode must be two ASCII digits",
-                )]);
-            };
-            let client_label = pairing_client_label(&request.client_label);
-            let requested_client_id = normalize_pairing_client_id(request.client_id.as_deref());
-            let Some(notifier) = pairing_notifier.as_ref() else {
-                return Ok(vec![error_message(
-                    proc_id,
-                    "failed",
-                    "daemon failed to start pairing",
-                )]);
-            };
-            let current_session_id = rpc_session_id(&session_state).await;
-            let attempt_key = pairing_attempt_key(requested_client_id.as_deref());
-            let attempt_id = begin_pairing_attempt(&pairing_challenge, attempt_key.clone()).await;
-            let config = load_runtime_config(config_path, &config_state).await?;
-            let daemon_url = pairing_daemon_url(&config);
-            if let Err(err) = notifier
-                .confirm_pairing_request(PairingConfirmationRequest {
-                    daemon_url: daemon_url.clone(),
-                    confirmation_code,
-                    client_label: client_label.clone(),
-                })
-                .await
-            {
-                warn!(?err, "local pairing confirmation was rejected");
-                let mut state = pairing_challenge.lock().await;
-                if state
-                    .current_attempts
-                    .get(&attempt_key)
-                    .is_some_and(|current| *current == attempt_id)
-                {
-                    state.current_attempts.remove(&attempt_key);
+enum UnaryRpcOutcome {
+    Response(RpcResponse),
+    Message(ReqResMessage),
+}
+
+impl UnaryRpcOutcome {
+    fn into_message(self) -> ReqResMessage {
+        match self {
+            Self::Response(response) => {
+                let payload = response.encode_payload();
+                match payload {
+                    Some(payload) => ok_payload_message(response.proc_id().as_u64(), payload),
+                    None => ok_void_message(response.proc_id().as_u64()),
                 }
-                return Ok(vec![error_message(
-                    proc_id,
-                    "failed",
-                    "daemon failed to confirm pairing",
-                )]);
             }
-            if !is_current_pairing_attempt(&pairing_challenge, &attempt_key, attempt_id).await {
-                return Ok(vec![error_message(
+            Self::Message(message) => message,
+        }
+    }
+}
+
+impl From<RpcResponse> for UnaryRpcOutcome {
+    fn from(value: RpcResponse) -> Self {
+        Self::Response(value)
+    }
+}
+
+impl HostRpcHandler {
+    async fn get_daemon_info(&mut self, _: ()) -> Result<UnaryRpcOutcome> {
+        Ok(
+            RpcResponse::GetDaemonInfo(DaemonInfo::current_with_supported_procs(
+                rpc_handlers().supported_procs(),
+            ))
+            .into(),
+        )
+    }
+
+    async fn start_pairing(&mut self, request: StartPairingRequest) -> Result<UnaryRpcOutcome> {
+        let proc_id = ProcId::StartPairing.as_u64();
+        let Some(confirmation_code) = normalize_confirmation_code(&request.confirmation_code)
+        else {
+            return Ok(UnaryRpcOutcome::Message(generic_error_message(
+                proc_id,
+                RpcErrorCode::MalformedPayload,
+                "StartPairing confirmationCode must be two ASCII digits",
+            )));
+        };
+        let client_label = pairing_client_label(&request.client_label);
+        let requested_client_id = normalize_pairing_client_id(request.client_id.as_deref());
+        let Some(notifier) = self.pairing_notifier.as_ref() else {
+            return Ok(UnaryRpcOutcome::Message(error_message(
+                proc_id,
+                "failed",
+                "daemon failed to start pairing",
+            )));
+        };
+        let current_session_id = rpc_session_id(&self.session_state).await;
+        let attempt_key = pairing_attempt_key(requested_client_id.as_deref());
+        let attempt_id = begin_pairing_attempt(&self.pairing_challenge, attempt_key.clone()).await;
+        let config = load_runtime_config(&self.config_path, &self.config_state).await?;
+        let daemon_url = pairing_daemon_url(&config);
+        if let Err(err) = notifier
+            .confirm_pairing_request(PairingConfirmationRequest {
+                daemon_url: daemon_url.clone(),
+                confirmation_code,
+                client_label: client_label.clone(),
+            })
+            .await
+        {
+            warn!(?err, "local pairing confirmation was rejected");
+            let mut state = self.pairing_challenge.lock().await;
+            if state
+                .current_attempts
+                .get(&attempt_key)
+                .is_some_and(|current| *current == attempt_id)
+            {
+                state.current_attempts.remove(&attempt_key);
+            }
+            return Ok(UnaryRpcOutcome::Message(error_message(
+                proc_id,
+                "failed",
+                "daemon failed to confirm pairing",
+            )));
+        }
+        if !is_current_pairing_attempt(&self.pairing_challenge, &attempt_key, attempt_id).await {
+            return Ok(UnaryRpcOutcome::Message(error_message(
+                proc_id,
+                "failed",
+                "pairing request was superseded",
+            )));
+        }
+
+        let now = now_unix();
+        let pairing = create_pairing_code(now);
+        let pairing_code_expires_at_unix = pairing.record.expires_at_unix;
+        {
+            let mut state = self.pairing_challenge.lock().await;
+            if !state
+                .current_attempts
+                .get(&attempt_key)
+                .is_some_and(|current| *current == attempt_id)
+            {
+                return Ok(UnaryRpcOutcome::Message(error_message(
                     proc_id,
                     "failed",
                     "pairing request was superseded",
-                )]);
+                )));
             }
-
-            let now = now_unix();
-            let pairing = create_pairing_code(now);
-            let pairing_code_expires_at_unix = pairing.record.expires_at_unix;
-            {
-                let mut state = pairing_challenge.lock().await;
-                if !state
-                    .current_attempts
-                    .get(&attempt_key)
-                    .is_some_and(|current| *current == attempt_id)
-                {
-                    return Ok(vec![error_message(
-                        proc_id,
-                        "failed",
-                        "pairing request was superseded",
-                    )]);
-                }
-                state.active_challenge = Some(ActivePairingChallenge {
-                    attempt_id,
-                    attempt_key: attempt_key.clone(),
-                    owner_session_id: current_session_id,
-                    record: pairing.record,
-                    client_label,
-                    client_id: requested_client_id,
-                });
-            }
-
-            let notification = PairingCodeNotification {
-                daemon_url,
-                pairing_code: pairing.code,
-                expires_in_seconds: pairing_code_expires_at_unix - now,
-            };
-            if let Err(err) = notifier.notify_pairing_code(notification).await {
-                warn!(?err, "failed to notify local pairing UI");
-                let mut state = pairing_challenge.lock().await;
-                if state.active_challenge.as_ref().is_some_and(|challenge| {
-                    challenge.attempt_key == attempt_key && challenge.attempt_id == attempt_id
-                }) {
-                    state.active_challenge = None;
-                    state.current_attempts.remove(&attempt_key);
-                }
-                return Ok(vec![error_message(
-                    proc_id,
-                    "failed",
-                    "daemon failed to start pairing",
-                )]);
-            }
-            ok_payload_message(
-                proc_id,
-                StartPairingResponse {
-                    pairing_code_expires_at_unix,
-                }
-                .encode(),
-            )
-        }
-        RpcRequest::CompletePairing(request) => {
-            let now = now_unix();
-            let current_session_id = rpc_session_id(&session_state).await;
-            let pairing = {
-                let mut state = pairing_challenge.lock().await;
-                let Some(pairing) = state.active_challenge.as_ref() else {
-                    return Ok(vec![error_message(
-                        proc_id,
-                        "pairing_not_started",
-                        "create a local pairing code before completing pairing",
-                    )]);
-                };
-                if pairing.owner_session_id != current_session_id {
-                    return Ok(vec![error_message(
-                        proc_id,
-                        "pairing_not_started",
-                        "start pairing on this session before completing pairing",
-                    )]);
-                }
-                if now >= pairing.record.expires_at_unix {
-                    let attempt_key = pairing.attempt_key.clone();
-                    state.active_challenge = None;
-                    state.current_attempts.remove(&attempt_key);
-                    return Ok(vec![error_message(
-                        proc_id,
-                        "pairing_expired",
-                        "pairing code expired",
-                    )]);
-                }
-                if !verify_pairing_code(&pairing.record, request.code.trim(), now) {
-                    return Ok(vec![error_message(
-                        proc_id,
-                        "invalid_pairing_code",
-                        "pairing code is invalid",
-                    )]);
-                }
-                let pairing = state
-                    .active_challenge
-                    .take()
-                    .expect("active pairing challenge exists after validation");
-                state.current_attempts.remove(&pairing.attempt_key);
-                pairing
-            };
-
-            let mut state =
-                load_runtime_client_credentials(credentials_path, &client_credentials).await?;
-            let existing_record = pairing.client_id.as_deref().and_then(|client_id| {
-                state
-                    .clients
-                    .iter()
-                    .find(|record| record.client_id == client_id)
-                    .cloned()
+            state.active_challenge = Some(ActivePairingChallenge {
+                attempt_id,
+                attempt_key: attempt_key.clone(),
+                owner_session_id: current_session_id,
+                record: pairing.record,
+                client_label,
+                client_id: requested_client_id,
             });
-            let issued = match existing_record {
-                Some(record) => reissue_client_secret(&record, &pairing.client_label, now),
-                None => issue_client_secret(&pairing.client_label, now),
-            };
-            let client_id = issued.client_id.clone();
-            let client_credential_expires_at_unix = issued.record.expires_at_unix;
-            state.clients.retain(|record| record.client_id != client_id);
-            state.clients.push(issued.record);
-            store_runtime_client_credentials(
-                credentials_path,
-                &client_credentials,
-                &client_credentials_events,
-                state,
-            )
-            .await?;
+        }
 
-            ok_payload_message(
+        let notification = PairingCodeNotification {
+            daemon_url,
+            pairing_code: pairing.code,
+            expires_in_seconds: pairing_code_expires_at_unix - now,
+        };
+        if let Err(err) = notifier.notify_pairing_code(notification).await {
+            warn!(?err, "failed to notify local pairing UI");
+            let mut state = self.pairing_challenge.lock().await;
+            if state.active_challenge.as_ref().is_some_and(|challenge| {
+                challenge.attempt_key == attempt_key && challenge.attempt_id == attempt_id
+            }) {
+                state.active_challenge = None;
+                state.current_attempts.remove(&attempt_key);
+            }
+            return Ok(UnaryRpcOutcome::Message(error_message(
                 proc_id,
-                CompletePairingResponse {
-                    client_id,
-                    client_secret: issued.client_secret,
-                    client_credential_expires_at_unix,
-                }
-                .encode(),
-            )
+                "failed",
+                "daemon failed to start pairing",
+            )));
         }
-        RpcRequest::RenewClientCredential => {
-            let Some(client_id) = authenticated_client_id(&session_state).await else {
-                return Ok(vec![unauthorized_message(proc_id)]);
+
+        Ok(RpcResponse::StartPairing(StartPairingResponse {
+            pairing_code_expires_at_unix,
+        })
+        .into())
+    }
+
+    async fn complete_pairing(
+        &mut self,
+        request: CompletePairingRequest,
+    ) -> Result<UnaryRpcOutcome> {
+        let proc_id = ProcId::CompletePairing.as_u64();
+        let now = now_unix();
+        let current_session_id = rpc_session_id(&self.session_state).await;
+        let pairing = {
+            let mut state = self.pairing_challenge.lock().await;
+            let Some(pairing) = state.active_challenge.as_ref() else {
+                return Ok(UnaryRpcOutcome::Message(error_message(
+                    proc_id,
+                    "pairing_not_started",
+                    "create a local pairing code before completing pairing",
+                )));
             };
-            let now = now_unix();
-            let mut state =
-                load_runtime_client_credentials(credentials_path, &client_credentials).await?;
-            let Some(record) = state
+            if pairing.owner_session_id != current_session_id {
+                return Ok(UnaryRpcOutcome::Message(error_message(
+                    proc_id,
+                    "pairing_not_started",
+                    "start pairing on this session before completing pairing",
+                )));
+            }
+            if now >= pairing.record.expires_at_unix {
+                let attempt_key = pairing.attempt_key.clone();
+                state.active_challenge = None;
+                state.current_attempts.remove(&attempt_key);
+                return Ok(UnaryRpcOutcome::Message(error_message(
+                    proc_id,
+                    "pairing_expired",
+                    "pairing code expired",
+                )));
+            }
+            if !verify_pairing_code(&pairing.record, request.code.trim(), now) {
+                return Ok(UnaryRpcOutcome::Message(error_message(
+                    proc_id,
+                    "invalid_pairing_code",
+                    "pairing code is invalid",
+                )));
+            }
+            let pairing = state
+                .active_challenge
+                .take()
+                .expect("active pairing challenge exists after validation");
+            state.current_attempts.remove(&pairing.attempt_key);
+            pairing
+        };
+
+        let mut state =
+            load_runtime_client_credentials(&self.credentials_path, &self.client_credentials)
+                .await?;
+        let existing_record = pairing.client_id.as_deref().and_then(|client_id| {
+            state
                 .clients
-                .iter_mut()
+                .iter()
                 .find(|record| record.client_id == client_id)
-            else {
-                return Ok(vec![unauthorized_message(proc_id)]);
-            };
-            renew_client_credential(record, now);
-            let client_credential_expires_at_unix = record.expires_at_unix;
-            store_runtime_client_credentials(
-                credentials_path,
-                &client_credentials,
-                &client_credentials_events,
-                state,
-            )
-            .await?;
-            ok_payload_message(
-                proc_id,
-                RenewClientCredentialResponse {
-                    client_credential_expires_at_unix,
-                }
-                .encode(),
-            )
+                .cloned()
+        });
+        let issued = match existing_record {
+            Some(record) => reissue_client_secret(&record, &pairing.client_label, now),
+            None => issue_client_secret(&pairing.client_label, now),
+        };
+        let client_id = issued.client_id.clone();
+        let client_credential_expires_at_unix = issued.record.expires_at_unix;
+        state.clients.retain(|record| record.client_id != client_id);
+        state.clients.push(issued.record);
+        store_runtime_client_credentials(
+            &self.credentials_path,
+            &self.client_credentials,
+            &self.client_credentials_events,
+            state,
+        )
+        .await?;
+
+        Ok(RpcResponse::CompletePairing(CompletePairingResponse {
+            client_id,
+            client_secret: issued.client_secret,
+            client_credential_expires_at_unix,
+        })
+        .into())
+    }
+
+    async fn renew_client_credential(&mut self, _: ()) -> Result<UnaryRpcOutcome> {
+        let proc_id = ProcId::RenewClientCredential.as_u64();
+        let Some(client_id) = authenticated_client_id(&self.session_state).await else {
+            return Ok(UnaryRpcOutcome::Message(unauthorized_message(proc_id)));
+        };
+        let now = now_unix();
+        let mut state =
+            load_runtime_client_credentials(&self.credentials_path, &self.client_credentials)
+                .await?;
+        let Some(record) = state
+            .clients
+            .iter_mut()
+            .find(|record| record.client_id == client_id)
+        else {
+            return Ok(UnaryRpcOutcome::Message(unauthorized_message(proc_id)));
+        };
+        renew_client_credential(record, now);
+        let client_credential_expires_at_unix = record.expires_at_unix;
+        store_runtime_client_credentials(
+            &self.credentials_path,
+            &self.client_credentials,
+            &self.client_credentials_events,
+            state,
+        )
+        .await?;
+        Ok(
+            RpcResponse::RenewClientCredential(RenewClientCredentialResponse {
+                client_credential_expires_at_unix,
+            })
+            .into(),
+        )
+    }
+
+    async fn create_nodes(&mut self, request: CreateNodesReq) -> Result<UnaryRpcOutcome> {
+        Ok(RpcResponse::CreateNodes(create_nodes(self.files.as_ref(), request).await).into())
+    }
+
+    async fn rename_paths(&mut self, request: RenamePathsReq) -> Result<UnaryRpcOutcome> {
+        Ok(RpcResponse::RenamePaths(rename_paths(self.files.as_ref(), request).await).into())
+    }
+
+    async fn delete_paths(&mut self, request: DeletePathsReq) -> Result<UnaryRpcOutcome> {
+        let mode = request.mode;
+        let response = delete_paths(self.files.as_ref(), request).await;
+        if mode == DeleteMode::Trash && bulk_mutation_has_ok(&response) {
+            notify_trash_changed(&self.trash_events);
         }
-        RpcRequest::CreateNodes(request) => ok_payload_message(
-            proc_id,
-            create_nodes(files.as_ref(), request).await.encode(),
-        ),
-        RpcRequest::RenamePaths(request) => ok_payload_message(
-            proc_id,
-            rename_paths(files.as_ref(), request).await.encode(),
-        ),
-        RpcRequest::DeletePaths(request) => {
-            let mode = request.mode;
-            let response = delete_paths(files.as_ref(), request).await;
-            if mode == DeleteMode::Trash && bulk_mutation_has_ok(&response) {
-                notify_trash_changed(&trash_events);
-            }
-            ok_payload_message(proc_id, response.encode())
+        Ok(RpcResponse::DeletePaths(response).into())
+    }
+
+    async fn restore_trash_items(
+        &mut self,
+        request: RestoreTrashItemsReq,
+    ) -> Result<UnaryRpcOutcome> {
+        let response = restore_trash_items(self.files.as_ref(), request).await;
+        if bulk_mutation_has_ok(&response) {
+            notify_trash_changed(&self.trash_events);
         }
-        RpcRequest::RestoreTrashItems(request) => {
-            let response = restore_trash_items(files.as_ref(), request).await;
-            if bulk_mutation_has_ok(&response) {
-                notify_trash_changed(&trash_events);
-            }
-            ok_payload_message(proc_id, response.encode())
+        Ok(RpcResponse::RestoreTrashItems(response).into())
+    }
+
+    async fn purge_trash_items(&mut self, request: PurgeTrashItemsReq) -> Result<UnaryRpcOutcome> {
+        let response = purge_trash_items(self.files.as_ref(), request).await;
+        if bulk_mutation_has_ok(&response) {
+            notify_trash_changed(&self.trash_events);
         }
-        RpcRequest::PurgeTrashItems(request) => {
-            let response = purge_trash_items(files.as_ref(), request).await;
-            if bulk_mutation_has_ok(&response) {
-                notify_trash_changed(&trash_events);
-            }
-            ok_payload_message(proc_id, response.encode())
+        Ok(RpcResponse::PurgeTrashItems(response).into())
+    }
+
+    async fn create_terminal_session(
+        &mut self,
+        request: CreateTerminalSessionReq,
+    ) -> Result<UnaryRpcOutcome> {
+        let proc_id = ProcId::CreateTerminalSession.as_u64();
+        let Some(client_id) = authenticated_client_id(&self.session_state).await else {
+            return Ok(UnaryRpcOutcome::Message(unauthorized_message(proc_id)));
+        };
+        match self.terminals.create_session(request, client_id) {
+            Ok(session) => Ok(RpcResponse::CreateTerminalSession(session).into()),
+            Err(err) => Ok(UnaryRpcOutcome::Message(terminal_service_error_message(
+                proc_id, err,
+            ))),
         }
-        RpcRequest::CreateTerminalSession(request) => {
-            let Some(client_id) = authenticated_client_id(&session_state).await else {
-                return Ok(vec![unauthorized_message(proc_id)]);
-            };
-            match terminals.create_session(request, client_id) {
-                Ok(session) => ok_payload_message(proc_id, session.encode()),
-                Err(err) => terminal_service_error_message(proc_id, err),
-            }
+    }
+
+    async fn take_terminal_control(
+        &mut self,
+        request: TakeTerminalControlReq,
+    ) -> Result<UnaryRpcOutcome> {
+        let proc_id = ProcId::TakeTerminalControl.as_u64();
+        match self
+            .terminals
+            .take_control(request, rpc_session_id(&self.session_state).await)
+        {
+            Ok(response) => Ok(RpcResponse::TakeTerminalControl(response).into()),
+            Err(err) => Ok(UnaryRpcOutcome::Message(terminal_service_error_message(
+                proc_id, err,
+            ))),
         }
-        RpcRequest::TakeTerminalControl(request) => {
-            match terminals.take_control(request, rpc_session_id(&session_state).await) {
-                Ok(response) => ok_payload_message(proc_id, response.encode()),
-                Err(err) => terminal_service_error_message(proc_id, err),
-            }
+    }
+
+    async fn close_terminal_session(
+        &mut self,
+        request: CloseTerminalSessionReq,
+    ) -> Result<UnaryRpcOutcome> {
+        let proc_id = ProcId::CloseTerminalSession.as_u64();
+        match self.terminals.close_session(&request.terminal_session_id) {
+            Ok(()) => Ok(RpcResponse::CloseTerminalSession.into()),
+            Err(err) => Ok(UnaryRpcOutcome::Message(terminal_service_error_message(
+                proc_id, err,
+            ))),
         }
-        RpcRequest::CloseTerminalSession(request) => {
-            match terminals.close_session(&request.terminal_session_id) {
-                Ok(()) => ok_void_message(proc_id),
-                Err(err) => terminal_service_error_message(proc_id, err),
-            }
-        }
-        _ => error_message(
-            proc_id,
-            "not_implemented",
-            "this RPC is reserved but not implemented in the first cut",
-        ),
-    };
-    Ok(vec![response])
+    }
+
+    fn get_daemon_info_rpc<'a>(
+        &'a mut self,
+        request: (),
+    ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
+        Box::pin(self.get_daemon_info(request))
+    }
+
+    fn start_pairing_rpc<'a>(
+        &'a mut self,
+        request: StartPairingRequest,
+    ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
+        Box::pin(self.start_pairing(request))
+    }
+
+    fn complete_pairing_rpc<'a>(
+        &'a mut self,
+        request: CompletePairingRequest,
+    ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
+        Box::pin(self.complete_pairing(request))
+    }
+
+    fn renew_client_credential_rpc<'a>(
+        &'a mut self,
+        request: (),
+    ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
+        Box::pin(self.renew_client_credential(request))
+    }
+
+    fn create_nodes_rpc<'a>(
+        &'a mut self,
+        request: CreateNodesReq,
+    ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
+        Box::pin(self.create_nodes(request))
+    }
+
+    fn rename_paths_rpc<'a>(
+        &'a mut self,
+        request: RenamePathsReq,
+    ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
+        Box::pin(self.rename_paths(request))
+    }
+
+    fn delete_paths_rpc<'a>(
+        &'a mut self,
+        request: DeletePathsReq,
+    ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
+        Box::pin(self.delete_paths(request))
+    }
+
+    fn create_terminal_session_rpc<'a>(
+        &'a mut self,
+        request: CreateTerminalSessionReq,
+    ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
+        Box::pin(self.create_terminal_session(request))
+    }
+
+    fn take_terminal_control_rpc<'a>(
+        &'a mut self,
+        request: TakeTerminalControlReq,
+    ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
+        Box::pin(self.take_terminal_control(request))
+    }
+
+    fn close_terminal_session_rpc<'a>(
+        &'a mut self,
+        request: CloseTerminalSessionReq,
+    ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
+        Box::pin(self.close_terminal_session(request))
+    }
+
+    fn restore_trash_items_rpc<'a>(
+        &'a mut self,
+        request: RestoreTrashItemsReq,
+    ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
+        Box::pin(self.restore_trash_items(request))
+    }
+
+    fn purge_trash_items_rpc<'a>(
+        &'a mut self,
+        request: PurgeTrashItemsReq,
+    ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
+        Box::pin(self.purge_trash_items(request))
+    }
 }
 
 fn requires_authentication(proc_id: u64) -> bool {
@@ -2715,6 +3254,29 @@ fn rpc_request_decode_error_message(proc_id: u64, err: RpcRequestDecodeError) ->
     }
 }
 
+fn stream_rpc_request_decode_error_message(
+    proc_id: u64,
+    err: RpcRequestDecodeError,
+) -> ReqResMessage {
+    match err {
+        RpcRequestDecodeError::UnknownProcId(_) => stream_generic_error_message(
+            proc_id,
+            RpcErrorCode::NotImplemented,
+            "this RPC is reserved but not implemented in the first cut",
+        ),
+        RpcRequestDecodeError::MissingPayload { proc } => stream_generic_error_message(
+            proc_id,
+            RpcErrorCode::MissingPayload,
+            &format!("{} requires a payload", proc.name()),
+        ),
+        RpcRequestDecodeError::MalformedPayload { proc, .. } => stream_generic_error_message(
+            proc_id,
+            RpcErrorCode::MalformedPayload,
+            &format!("{} payload is malformed", proc.name()),
+        ),
+    }
+}
+
 fn stream_generic_error_message(_proc_id: u64, code: RpcErrorCode, message: &str) -> ReqResMessage {
     ReqResMessage::ResponseStreamErrorEnd {
         error_kind: RpcErrorKind::System,
@@ -2748,150 +3310,20 @@ fn rpc_error_code(code: &str) -> RpcErrorCode {
 }
 
 fn method_error_payload(proc_id: u64, code: &str, message: &str) -> Option<Vec<u8>> {
-    let variant_id = method_error_variant(proc_id, code)?;
-    Some(
-        Value::Array(vec![
-            Value::U64(variant_id),
-            Value::Map(std::collections::BTreeMap::from([(
-                1,
-                Value::Text(message.to_string()),
-            )])),
-        ])
-        .encode(),
-    )
-}
-
-fn method_error_variant(proc_id: u64, code: &str) -> Option<u64> {
-    match proc_id {
-        id if id == ProcId::GetDaemonInfo.as_u64() => match code {
-            "failed" => Some(0),
-            _ => None,
-        },
-        id if id == ProcId::SubscribeClients.as_u64() => match code {
-            "failed" => Some(0),
-            "permission_denied" => Some(1),
-            _ => None,
-        },
-        id if id == ProcId::StartPairing.as_u64() => match code {
-            "failed" => Some(0),
-            _ => None,
-        },
-        id if id == ProcId::CompletePairing.as_u64() => match code {
-            "pairing_not_started" => Some(1),
-            "pairing_expired" => Some(2),
-            "invalid_pairing_code" => Some(3),
-            _ => None,
-        },
-        id if id == ProcId::RenewClientCredential.as_u64() => match code {
-            "failed" => Some(0),
-            _ => None,
-        },
-        id if id == ProcId::SubscribeRoots.as_u64() => match code {
-            "failed" => Some(0),
-            _ => None,
-        },
-        id if id == ProcId::SubscribeDirectory.as_u64() => match code {
-            "failed" => Some(0),
-            "permission_denied" => Some(1),
-            "not_found" => Some(2),
-            "not_directory" => Some(3),
-            _ => None,
-        },
-        id if id == ProcId::SubscribeTrashItems.as_u64() => match code {
-            "failed" | "unsupported" => Some(0),
-            "permission_denied" => Some(1),
-            _ => None,
-        },
-        id if id == ProcId::ReadFile.as_u64() => match code {
-            "failed" => Some(0),
-            "permission_denied" => Some(1),
-            "not_found" => Some(2),
-            "not_file" => Some(3),
-            "invalid_path" => Some(4),
-            _ => None,
-        },
-        id if id == ProcId::WriteFile.as_u64() => match code {
-            "failed" => Some(0),
-            "permission_denied" => Some(1),
-            "not_found" => Some(2),
-            "already_exists" => Some(3),
-            "not_directory" => Some(4),
-            "not_file" => Some(5),
-            "invalid_path" => Some(6),
-            _ => None,
-        },
-        id if id == ProcId::CreateNodes.as_u64()
-            || id == ProcId::RenamePaths.as_u64()
-            || id == ProcId::DeletePaths.as_u64()
-            || id == ProcId::RestoreTrashItems.as_u64()
-            || id == ProcId::PurgeTrashItems.as_u64() =>
-        {
-            match code {
-                "failed" => Some(0),
-                _ => None,
-            }
-        }
-        id if id == ProcId::CreateTerminalSession.as_u64() => match code {
-            "failed" => Some(0),
-            "permission_denied" => Some(1),
-            "invalid_size" => Some(2),
-            "shell_not_found" => Some(3),
-            "invalid_launch" => Some(4),
-            _ => None,
-        },
-        id if id == ProcId::SubscribeTerminalSessions.as_u64() => match code {
-            "failed" => Some(0),
-            "permission_denied" => Some(1),
-            _ => None,
-        },
-        id if id == ProcId::SubscribeAvailableShells.as_u64() => match code {
-            "failed" => Some(0),
-            "permission_denied" => Some(1),
-            _ => None,
-        },
-        id if id == ProcId::AttachTerminalSession.as_u64() => match code {
-            "failed" => Some(0),
-            "not_found" => Some(1),
-            "permission_denied" => Some(2),
-            "invalid_size" => Some(3),
-            _ => None,
-        },
-        id if id == ProcId::TakeTerminalControl.as_u64() => match code {
-            "failed" => Some(0),
-            "not_found" => Some(1),
-            "permission_denied" => Some(2),
-            "attach_not_found" => Some(3),
-            "invalid_size" => Some(4),
-            _ => None,
-        },
-        id if id == ProcId::WriteTerminalInput.as_u64() => match code {
-            "failed" => Some(0),
-            "not_found" => Some(1),
-            "permission_denied" => Some(2),
-            "attach_not_found" => Some(3),
-            "not_primary_attach" => Some(4),
-            _ => None,
-        },
-        id if id == ProcId::CloseTerminalSession.as_u64() => match code {
-            "failed" => Some(0),
-            "not_found" => Some(1),
-            "permission_denied" => Some(2),
-            _ => None,
-        },
-        _ => None,
-    }
+    ProcId::from_u64(proc_id)?.method_error_payload(code, message)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wgo_daemon_core::cbor::Value;
     use wgo_daemon_core::pairing::{
         create_pairing_code, issue_client_secret, verify_client_secret,
         CLIENT_CREDENTIAL_TTL_SECONDS, PAIRING_TTL_SECONDS,
     };
     use wgo_daemon_core::rpc::{
         CompletePairingRequest, CreateNodeOp, DeleteMode, FsEntryKind, ReadFileReq,
-        StartPairingRequest, WriteFileChunk, WriteFileResult, WriteFileStart,
+        StartPairingRequest, WriteFileResult, WriteFileStart,
     };
 
     #[test]
@@ -2945,6 +3377,43 @@ mod tests {
         assert_eq!(
             load_or_default(&config_path).unwrap().listen_addr,
             "127.0.0.1:8888"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_daemon_info_reports_registered_supported_procs() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("wgo.yaml");
+        let credentials_path = client_credentials_path(&config_path);
+
+        let responses = handle_rpc_messages(
+            vec![request_message(ProcId::GetDaemonInfo, None)],
+            &config_path,
+            &credentials_path,
+            Arc::new(Mutex::new(SystemConfig::default())),
+            Arc::new(Mutex::new(ClientCredentials::default())),
+            test_pairing_challenge(),
+            Arc::new(Mutex::new(RpcSessionState::default())),
+            test_files(),
+            test_terminals(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(responses.len(), 1);
+        assert!(matches!(
+            responses[0],
+            ReqResMessage::ResponseUnaryOk { .. }
+        ));
+        let daemon_info = DaemonInfo::decode(payload(&responses[0])).unwrap();
+        assert_eq!(
+            daemon_info.supported_proc_ids,
+            rpc_handlers()
+                .supported_procs()
+                .iter()
+                .map(|proc| proc.as_u64())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -3893,11 +4362,11 @@ mod tests {
             Box::pin(async { Err(ServiceError::Unsupported) })
         }
 
-        fn write_file(
-            &self,
+        fn write_file<'a>(
+            &'a self,
             _start: WriteFileStart,
-            _chunks: Vec<WriteFileChunk>,
-        ) -> wgo_daemon_core::traits::BoxFutureResult<'_, WriteFileResult> {
+            _chunks: Box<dyn WriteFileChunkSource + 'a>,
+        ) -> wgo_daemon_core::traits::BoxFutureResult<'a, WriteFileResult> {
             Box::pin(async { Err(ServiceError::Unsupported) })
         }
 

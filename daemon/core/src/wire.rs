@@ -61,6 +61,20 @@ impl ReqResMessage {
         Self::from_flattened_parts(kind, fields)
     }
 
+    pub fn decode_prefix(bytes: &[u8]) -> Result<Option<(Self, usize)>, WireError> {
+        if bytes.len() > MAX_MESSAGE_SEQUENCE_SIZE {
+            return Err(WireError::SequenceTooLarge);
+        }
+        let Some((kind, kind_len)) = Value::decode_prefix(bytes)? else {
+            return Ok(None);
+        };
+        let Some((fields, fields_len)) = Value::decode_prefix(&bytes[kind_len..])? else {
+            return Ok(None);
+        };
+        let message = Self::from_flattened_parts(kind, fields)?;
+        Ok(Some((message, kind_len + fields_len)))
+    }
+
     pub fn decode_sequence(bytes: &[u8]) -> Result<Vec<Self>, WireError> {
         if bytes.len() > MAX_MESSAGE_SEQUENCE_SIZE {
             return Err(WireError::SequenceTooLarge);
