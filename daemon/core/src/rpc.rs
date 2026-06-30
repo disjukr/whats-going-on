@@ -18,16 +18,18 @@ pub use crate::generated::rpc::{
     CompletePairingReq, CompletePairingRes, CreateNodeOp, CreateNodeSpec, CreateNodesReq,
     CreateTerminalSessionError, CreateTerminalSessionReq, DaemonInfo, DeleteMode, DeletePathsReq,
     DirectoryEntryKey, DirectorySubscriptionCloseReason, DirectoryTableEvent, FsEntry, FsEntryKind,
-    FsMutationError, FsMutationItemError, GetDaemonInfoError, PurgeTrashItemsReq, ReadFileChunk,
-    ReadFileError, ReadFileReq, RenamePathOp, RenamePathsReq, RenewClientCredentialError,
-    RenewClientCredentialRes, RestoreTrashItemsReq, RootEntryKey, RootsSubscriptionCloseReason,
-    RootsTableEvent, StartPairingError, StartPairingReq, StartPairingRes,
-    SubscribeAvailableShellsError, SubscribeClientsError, SubscribeDirectoryError,
-    SubscribeDirectoryReq, SubscribeRootsError, SubscribeTrashItemsError, TakeTerminalControlError,
-    TakeTerminalControlReq, TakeTerminalControlRes, TerminalEvent, TerminalExit,
-    TerminalLaunchSpec, TerminalSessionCloseReason, TerminalSessionInfo, TerminalSessionKey,
+    FsMutationError, FsMutationItemError, GetDaemonInfoError, ProcDefinition, ProcId, ProcStream,
+    PurgeTrashItemsReq, ReadFileChunk, ReadFileError, ReadFileReq, RenamePathOp, RenamePathsReq,
+    RenewClientCredentialError, RenewClientCredentialRes, RestoreTrashItemsReq, RootEntryKey,
+    RootsSubscriptionCloseReason, RootsTableEvent, RpcRequest, RpcRequestDecodeError, RpcResponse,
+    StartPairingError, StartPairingReq, StartPairingRes, SubscribeAvailableShellsError,
+    SubscribeClientsError, SubscribeDirectoryError, SubscribeDirectoryReq, SubscribeRootsError,
+    SubscribeTrashItemsError, TakeTerminalControlError, TakeTerminalControlReq,
+    TakeTerminalControlRes, TerminalEvent, TerminalExit, TerminalLaunchSpec,
+    TerminalSessionCloseReason, TerminalSessionInfo, TerminalSessionKey,
     TerminalSessionsTableEvent, TrashItem, TrashItemSize, TrashItemsSubscriptionCloseReason,
     TrashItemsTableEvent, WriteFileError, WriteFileMode, WriteFileResult, WriteTerminalInputError,
+    PROC_DEFINITIONS,
 };
 
 pub type StartPairingRequest = StartPairingReq;
@@ -36,63 +38,30 @@ pub type CompletePairingRequest = CompletePairingReq;
 pub type CompletePairingResponse = CompletePairingRes;
 pub type RenewClientCredentialResponse = RenewClientCredentialRes;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u64)]
-pub enum ProcId {
-    GetDaemonInfo = 1,
-    StartPairing = 2,
-    CompletePairing = 3,
-    RenewClientCredential = 4,
-    SubscribeRoots = 5,
-    SubscribeDirectory = 6,
-    ReadFile = 7,
-    WriteFile = 8,
-    CreateNodes = 9,
-    RenamePaths = 10,
-    DeletePaths = 11,
-    CreateTerminalSession = 12,
-    SubscribeTerminalSessions = 13,
-    SubscribeAvailableShells = 14,
-    AttachTerminalSession = 15,
-    TakeTerminalControl = 16,
-    WriteTerminalInput = 17,
-    CloseTerminalSession = 18,
-    SubscribeClients = 19,
-    SubscribeTrashItems = 20,
-    RestoreTrashItems = 21,
-    PurgeTrashItems = 22,
-}
-
-impl ProcId {
-    pub const SUPPORTED: [Self; 22] = [
-        Self::GetDaemonInfo,
-        Self::StartPairing,
-        Self::CompletePairing,
-        Self::RenewClientCredential,
-        Self::SubscribeRoots,
-        Self::SubscribeDirectory,
-        Self::ReadFile,
-        Self::WriteFile,
-        Self::CreateNodes,
-        Self::RenamePaths,
-        Self::DeletePaths,
-        Self::CreateTerminalSession,
-        Self::SubscribeTerminalSessions,
-        Self::SubscribeAvailableShells,
-        Self::AttachTerminalSession,
-        Self::TakeTerminalControl,
-        Self::WriteTerminalInput,
-        Self::CloseTerminalSession,
-        Self::SubscribeClients,
-        Self::SubscribeTrashItems,
-        Self::RestoreTrashItems,
-        Self::PurgeTrashItems,
-    ];
-
-    pub fn as_u64(self) -> u64 {
-        self as u64
-    }
-}
+pub const SUPPORTED_PROCS: [ProcId; 22] = [
+    ProcId::GetDaemonInfo,
+    ProcId::StartPairing,
+    ProcId::CompletePairing,
+    ProcId::RenewClientCredential,
+    ProcId::SubscribeRoots,
+    ProcId::SubscribeDirectory,
+    ProcId::ReadFile,
+    ProcId::WriteFile,
+    ProcId::CreateNodes,
+    ProcId::RenamePaths,
+    ProcId::DeletePaths,
+    ProcId::CreateTerminalSession,
+    ProcId::SubscribeTerminalSessions,
+    ProcId::SubscribeAvailableShells,
+    ProcId::AttachTerminalSession,
+    ProcId::TakeTerminalControl,
+    ProcId::WriteTerminalInput,
+    ProcId::CloseTerminalSession,
+    ProcId::SubscribeClients,
+    ProcId::SubscribeTrashItems,
+    ProcId::RestoreTrashItems,
+    ProcId::PurgeTrashItems,
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DaemonProcessInfo {
@@ -107,7 +76,7 @@ impl DaemonProcessInfo {
     fn current() -> Self {
         let started_at_ms = current_unix_ms();
         Self {
-            supported_proc_ids: ProcId::SUPPORTED.into_iter().map(ProcId::as_u64).collect(),
+            supported_proc_ids: SUPPORTED_PROCS.into_iter().map(ProcId::as_u64).collect(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             os: current_os_name(),
             instance_id: format!("{started_at_ms}-{}", std::process::id()),
@@ -493,12 +462,19 @@ mod tests {
     use crate::rpc::{
         CompletePairingRequest, CompletePairingResponse, DaemonInfo, DirectoryTableEvent, FsEntry,
         FsEntryKind, ReadFileChunk, RenewClientCredentialResponse, StartPairingRequest,
-        WriteFileChunk, WriteFileMode, WriteFileReq, WriteFileStart,
+        WriteFileChunk, WriteFileMode, WriteFileReq, WriteFileStart, SUPPORTED_PROCS,
     };
 
     #[test]
     fn daemon_info_roundtrip() {
         let daemon_info = DaemonInfo::current();
+        assert_eq!(
+            daemon_info.supported_proc_ids,
+            SUPPORTED_PROCS
+                .into_iter()
+                .map(crate::rpc::ProcId::as_u64)
+                .collect::<Vec<_>>()
+        );
         assert_eq!(
             DaemonInfo::decode(&daemon_info.encode()).unwrap(),
             daemon_info

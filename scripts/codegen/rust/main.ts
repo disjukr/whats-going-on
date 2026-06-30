@@ -14,7 +14,14 @@ type Declaration =
 interface ProcDeclaration {
   kind: "proc";
   name: string;
+  id: number;
+  stream: ProcStream;
+  input: TypeRef;
+  output: TypeRef;
+  error: TypeRef;
 }
+
+type ProcStream = "unary" | "server" | "client" | "bidi";
 
 interface StructDeclaration {
   kind: "struct";
@@ -195,7 +202,15 @@ function schemaFromIr(ir: bdl.BdlIr): Schema {
 
   for (const [typePath, def] of Object.entries(ir.defs)) {
     if (def.type === "Proc") {
-      declarations.push({ kind: "proc", name: def.name });
+      declarations.push({
+        kind: "proc",
+        name: def.name,
+        id: requiredId(def, typePath),
+        stream: requiredProcStream(def, typePath),
+        input: typeRefFromIr(def.inputType),
+        output: typeRefFromIr(def.outputType),
+        error: typeRefFromIr(def.errorType ?? plainType("void")),
+      });
     } else if (def.type === "Struct") {
       declarations.push({
         kind: "struct",
@@ -268,8 +283,19 @@ function plainType(valueTypePath: string): bdl.Plain {
 function validateSchema(schema: Schema) {
   const names = new Set<string>();
   const paths = new Set<string>();
+  const procIds = new Set<number>();
   for (const declaration of schema.declarations) {
-    if (declaration.kind === "proc") continue;
+    if (declaration.kind === "proc") {
+      if (names.has(declaration.name)) {
+        throw new Error(`duplicate declaration ${declaration.name}`);
+      }
+      names.add(declaration.name);
+      if (procIds.has(declaration.id)) {
+        throw new Error(`duplicate proc id ${declaration.id}`);
+      }
+      procIds.add(declaration.id);
+      continue;
+    }
     if (names.has(declaration.name)) {
       throw new Error(`duplicate declaration ${declaration.name}`);
     }
@@ -277,8 +303,11 @@ function validateSchema(schema: Schema) {
     paths.add(declaration.typePath);
   }
   for (const declaration of schema.declarations) {
-    if (declaration.kind === "proc") continue;
-    if (declaration.kind === "struct") {
+    if (declaration.kind === "proc") {
+      validateTypeRef(paths, declaration.input);
+      validateTypeRef(paths, declaration.output);
+      validateTypeRef(paths, declaration.error);
+    } else if (declaration.kind === "struct") {
       validateUniqueIds(`${declaration.name} fields`, declaration.fields);
       for (const field of declaration.fields) {
         validateTypeRef(paths, field.type);
@@ -338,6 +367,7 @@ function emitRust(schema: Schema, options: CliOptions): string {
     out.line();
     emitCodec(out, declaration, named, options);
   }
+  emitProcHelpers(out, schema, named, options);
   emitRuntimeHelpers(out);
   return out.toString();
 }
@@ -660,6 +690,261 @@ function emitEncodeDecodeWrappers(out: Writer, name: string) {
   out.line();
   out.line(`pub fn type_name() -> &'static str { "${name}" }`);
   out.line();
+}
+
+function emitProcHelpers(
+  out: Writer,
+  schema: Schema,
+  named: Map<string, Declaration>,
+  options: CliOptions,
+) {
+  const procs = procDeclarations(schema);
+  if (procs.length === 0 || !options.byteCodec) return;
+
+  out.line();
+  out.line("#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+  out.line("pub enum ProcStream {");
+  out.indent(() => {
+    out.line("Unary,");
+    out.line("Server,");
+    out.line("Client,");
+    out.line("Bidi,");
+  });
+  out.line("}");
+
+  out.line();
+  out.line("#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+  out.line("pub struct ProcDefinition {");
+  out.indent(() => {
+    out.line("pub id: ProcId,");
+    out.line("pub wire_id: u64,");
+    out.line("pub name: &'static str,");
+    out.line("pub stream: ProcStream,");
+  });
+  out.line("}");
+
+  out.line();
+  out.line("#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+  out.line("pub enum ProcId {");
+  out.indent(() => {
+    for (const proc of procs) out.line(`${proc.name},`);
+  });
+  out.line("}");
+
+  out.line();
+  out.line(`pub static PROC_DEFINITIONS: [ProcDefinition; ${procs.length}] = [`);
+  out.indent(() => {
+    for (const proc of procs) {
+      out.line("ProcDefinition {");
+      out.indent(() => {
+        out.line(`id: ProcId::${proc.name},`);
+        out.line(`wire_id: ${proc.id},`);
+        out.line(`name: "${proc.name}",`);
+        out.line(`stream: ProcStream::${procStreamVariant(proc.stream)},`);
+      });
+      out.line("},");
+    }
+  });
+  out.line("];");
+
+  out.line();
+  out.line("impl ProcId {");
+  out.indent(() => {
+    out.line(`pub const KNOWN: [Self; ${procs.length}] = [`);
+    out.indent(() => {
+      for (const proc of procs) out.line(`Self::${proc.name},`);
+    });
+    out.line("];");
+    out.line();
+    out.line("pub fn as_u64(self) -> u64 {");
+    out.indent(() => out.line("self.definition().wire_id"));
+    out.line("}");
+    out.line();
+    out.line("pub fn from_u64(value: u64) -> Option<Self> {");
+    out.indent(() => {
+      out.line("match value {");
+      out.indent(() => {
+        for (const proc of procs) out.line(`${proc.id} => Some(Self::${proc.name}),`);
+        out.line("_ => None,");
+      });
+      out.line("}");
+    });
+    out.line("}");
+    out.line();
+    out.line("pub fn stream(self) -> ProcStream {");
+    out.indent(() => out.line("self.definition().stream"));
+    out.line("}");
+    out.line();
+    out.line("pub fn name(self) -> &'static str {");
+    out.indent(() => out.line("self.definition().name"));
+    out.line("}");
+    out.line();
+    out.line("pub fn definition(self) -> &'static ProcDefinition {");
+    out.indent(() => {
+      out.line("match self {");
+      out.indent(() => {
+        for (let index = 0; index < procs.length; index++) {
+          const proc = procs[index]!;
+          out.line(`Self::${proc.name} => &PROC_DEFINITIONS[${index}],`);
+        }
+      });
+      out.line("}");
+    });
+    out.line("}");
+  });
+  out.line("}");
+
+  out.line();
+  out.line("#[derive(Debug, Clone, PartialEq, Eq)]");
+  out.line("pub enum RpcRequest {");
+  out.indent(() => {
+    for (const proc of procs) emitProcMessageVariant(out, proc, proc.input);
+  });
+  out.line("}");
+
+  out.line();
+  out.line("#[derive(Debug, Clone, PartialEq)]");
+  out.line("pub enum RpcRequestDecodeError {");
+  out.indent(() => {
+    out.line("UnknownProcId(u64),");
+    out.line("MissingPayload { proc: ProcId },");
+    out.line("MalformedPayload { proc: ProcId, source: CodecError },");
+  });
+  out.line("}");
+
+  out.line();
+  out.line("impl RpcRequest {");
+  out.indent(() => {
+    out.line(
+      "pub fn decode(proc_id: u64, payload: Option<&[u8]>) -> Result<Self, RpcRequestDecodeError> {",
+    );
+    out.indent(() => {
+      out.line("let proc = ProcId::from_u64(proc_id).ok_or(RpcRequestDecodeError::UnknownProcId(proc_id))?;");
+      out.line("match proc {");
+      out.indent(() => {
+        for (const proc of procs) emitRpcRequestDecodeArm(out, proc);
+      });
+      out.line("}");
+    });
+    out.line("}");
+    out.line();
+    out.line("pub fn proc_id(&self) -> ProcId {");
+    out.indent(() => {
+      out.line("match self {");
+      out.indent(() => {
+        for (const proc of procs) emitProcMessageProcIdArm(out, "RpcRequest", proc, proc.input);
+      });
+      out.line("}");
+    });
+    out.line("}");
+    out.line();
+    out.line("pub fn proc_name(&self) -> &'static str {");
+    out.indent(() => out.line("self.proc_id().name()"));
+    out.line("}");
+  });
+  out.line("}");
+
+  out.line();
+  out.line("#[derive(Debug, Clone, PartialEq, Eq)]");
+  out.line("pub enum RpcResponse {");
+  out.indent(() => {
+    for (const proc of procs) emitProcMessageVariant(out, proc, proc.output);
+  });
+  out.line("}");
+
+  out.line();
+  out.line("impl RpcResponse {");
+  out.indent(() => {
+    out.line("pub fn proc_id(&self) -> ProcId {");
+    out.indent(() => {
+      out.line("match self {");
+      out.indent(() => {
+        for (const proc of procs) emitProcMessageProcIdArm(out, "RpcResponse", proc, proc.output);
+      });
+      out.line("}");
+    });
+    out.line("}");
+    out.line();
+    out.line("pub fn encode_payload(&self) -> Option<Vec<u8>> {");
+    out.indent(() => {
+      out.line("match self {");
+      out.indent(() => {
+        for (const proc of procs) emitRpcResponsePayloadArm(out, proc);
+      });
+      out.line("}");
+    });
+    out.line("}");
+  });
+  out.line("}");
+
+}
+
+function procDeclarations(schema: Schema): ProcDeclaration[] {
+  return schema.declarations
+    .filter((declaration): declaration is ProcDeclaration =>
+      declaration.kind === "proc"
+    )
+    .toSorted((a, b) => a.id - b.id);
+}
+
+function emitProcMessageVariant(
+  out: Writer,
+  proc: ProcDeclaration,
+  type: TypeRef,
+) {
+  if (type.kind === "void") {
+    out.line(`${proc.name},`);
+  } else {
+    out.line(`${proc.name}(${rustType(type)}),`);
+  }
+}
+
+function emitRpcRequestDecodeArm(out: Writer, proc: ProcDeclaration) {
+  if (proc.input.kind === "void") {
+    out.line(`ProcId::${proc.name} => Ok(Self::${proc.name}),`);
+    return;
+  }
+  out.line(`ProcId::${proc.name} => {`);
+  out.indent(() => {
+    out.line("let Some(payload) = payload else {");
+    out.indent(() =>
+      out.line("return Err(RpcRequestDecodeError::MissingPayload { proc });")
+    );
+    out.line("};");
+    out.line(
+      `let value = ${typeName(proc.input)}::decode(payload).map_err(|source| RpcRequestDecodeError::MalformedPayload { proc, source })?;`,
+    );
+    out.line(`Ok(Self::${proc.name}(value))`);
+  });
+  out.line("},");
+}
+
+function emitProcMessageProcIdArm(
+  out: Writer,
+  enumName: string,
+  proc: ProcDeclaration,
+  type: TypeRef,
+) {
+  if (type.kind === "void") {
+    out.line(`${enumName}::${proc.name} => ProcId::${proc.name},`);
+  } else {
+    out.line(`${enumName}::${proc.name}(..) => ProcId::${proc.name},`);
+  }
+}
+
+function emitRpcResponsePayloadArm(out: Writer, proc: ProcDeclaration) {
+  if (proc.output.kind === "void") {
+    out.line(`Self::${proc.name} => None,`);
+  } else {
+    out.line(`Self::${proc.name}(value) => Some(value.encode()),`);
+  }
+}
+
+function procStreamVariant(stream: ProcStream): string {
+  if (stream === "unary") return "Unary";
+  if (stream === "server") return "Server";
+  if (stream === "client") return "Client";
+  return "Bidi";
 }
 
 function emitEncodeField(
@@ -1084,6 +1369,20 @@ function requiredId(
     throw new Error(`${label} requires integer @ id`);
   }
   return id;
+}
+
+function requiredProcStream(
+  item: { attributes: Record<string, string>; name: string },
+  label: string,
+): ProcStream {
+  const stream = requiredAttribute(item, "stream", label);
+  if (
+    stream !== "unary" && stream !== "server" && stream !== "client" &&
+    stream !== "bidi"
+  ) {
+    throw new Error(`${label} requires @ stream to be unary, server, client, or bidi`);
+  }
+  return stream;
 }
 
 function requiredAttribute(

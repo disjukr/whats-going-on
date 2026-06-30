@@ -45,4 +45,30 @@ mod tests {
             Err(rpc::CodecError::IntegerOutOfRange("u53"))
         ));
     }
+
+    #[test]
+    fn generated_proc_metadata_decodes_request_payload() {
+        let payload = rpc::StartPairingReq {
+            confirmation_code: "42".to_string(),
+            client_label: "test".to_string(),
+            client_id: Some("client-1".to_string()),
+        };
+
+        assert_eq!(rpc::ProcId::from_u64(2), Some(rpc::ProcId::StartPairing));
+        assert_eq!(rpc::PROC_DEFINITIONS.len(), rpc::ProcId::KNOWN.len());
+        assert_eq!(rpc::PROC_DEFINITIONS[1].id, rpc::ProcId::StartPairing);
+        assert_eq!(rpc::PROC_DEFINITIONS[1].wire_id, 2);
+        assert_eq!(rpc::PROC_DEFINITIONS[1].name, "StartPairing");
+        assert_eq!(rpc::ProcId::StartPairing.stream(), rpc::ProcStream::Unary);
+        assert_eq!(
+            rpc::RpcRequest::decode(2, Some(&payload.encode())).unwrap(),
+            rpc::RpcRequest::StartPairing(payload)
+        );
+        assert!(matches!(
+            rpc::RpcRequest::decode(2, None),
+            Err(rpc::RpcRequestDecodeError::MissingPayload {
+                proc: rpc::ProcId::StartPairing
+            })
+        ));
+    }
 }

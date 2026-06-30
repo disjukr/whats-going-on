@@ -28,15 +28,14 @@ use wgo_daemon_core::pairing::{
 };
 use wgo_daemon_core::rpc::{
     AttachTerminalSessionReq, AvailableShellsTableEvent, BulkMutationItemResult, BulkMutationRes,
-    ClientInfo, ClientKey, ClientsTableEvent, CloseTerminalSessionReq, CompletePairingRequest,
-    CompletePairingResponse, CreateNodesReq, CreateTerminalSessionReq, DaemonInfo, DeleteMode,
-    DeletePathsReq, DirectoryEntryKey, DirectorySubscriptionCloseReason, DirectoryTableEvent,
-    FsEntry, ProcId, PurgeTrashItemsReq, ReadFileChunk, ReadFileReq, RenamePathsReq,
-    RenewClientCredentialResponse, RestoreTrashItemsReq, RootEntryKey,
-    RootsSubscriptionCloseReason, RootsTableEvent, RpcErrorCode, RpcErrorPayload,
-    StartPairingRequest, StartPairingResponse, TakeTerminalControlReq, TerminalEvent,
-    TerminalSessionsTableEvent, TrashItem, TrashItemsSubscriptionCloseReason, TrashItemsTableEvent,
-    WriteFileReq, WriteTerminalInputReq,
+    ClientInfo, ClientKey, ClientsTableEvent, CompletePairingResponse, CreateNodesReq, DaemonInfo,
+    DeleteMode, DeletePathsReq, DirectoryEntryKey, DirectorySubscriptionCloseReason,
+    DirectoryTableEvent, FsEntry, ProcId, ProcStream, PurgeTrashItemsReq, ReadFileChunk,
+    ReadFileReq, RenamePathsReq, RenewClientCredentialResponse, RestoreTrashItemsReq, RootEntryKey,
+    RootsSubscriptionCloseReason, RootsTableEvent, RpcErrorCode, RpcErrorPayload, RpcRequest,
+    RpcRequestDecodeError, StartPairingResponse, TerminalEvent, TerminalSessionsTableEvent,
+    TrashItem, TrashItemsSubscriptionCloseReason, TrashItemsTableEvent, WriteFileReq,
+    WriteTerminalInputReq,
 };
 use wgo_daemon_core::traits::{FileService, ServiceError};
 use wgo_daemon_core::wire::{
@@ -860,23 +859,12 @@ fn handle_wire_datagram(bytes: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-fn is_subscription_proc(proc_id: u64) -> bool {
-    proc_id == ProcId::SubscribeRoots.as_u64()
-        || proc_id == ProcId::SubscribeDirectory.as_u64()
-        || proc_id == ProcId::SubscribeTrashItems.as_u64()
-        || proc_id == ProcId::SubscribeTerminalSessions.as_u64()
-        || proc_id == ProcId::SubscribeAvailableShells.as_u64()
-        || proc_id == ProcId::SubscribeClients.as_u64()
-}
-
 fn is_server_stream_proc(proc_id: u64) -> bool {
-    is_subscription_proc(proc_id)
-        || proc_id == ProcId::ReadFile.as_u64()
-        || proc_id == ProcId::AttachTerminalSession.as_u64()
+    ProcId::from_u64(proc_id).is_some_and(|proc| proc.stream() == ProcStream::Server)
 }
 
 fn is_client_stream_proc(proc_id: u64) -> bool {
-    proc_id == ProcId::WriteFile.as_u64() || proc_id == ProcId::WriteTerminalInput.as_u64()
+    ProcId::from_u64(proc_id).is_some_and(|proc| proc.stream() == ProcStream::Client)
 }
 
 async fn read_reqres_message_sequence_from_stream(
@@ -2012,29 +2000,14 @@ async fn handle_rpc_messages_with_events(
     if requires_authentication(proc_id) && !is_authenticated(&session_state).await {
         return Ok(vec![unauthorized_message(proc_id)]);
     }
+    let request = match RpcRequest::decode(proc_id, payload) {
+        Ok(request) => request,
+        Err(err) => return Ok(vec![rpc_request_decode_error_message(proc_id, err)]),
+    };
 
-    let response = match proc_id {
-        id if id == ProcId::GetDaemonInfo.as_u64() => {
-            ok_payload_message(proc_id, DaemonInfo::current().encode())
-        }
-        id if id == ProcId::StartPairing.as_u64() => {
-            let Some(payload) = payload else {
-                return Ok(vec![error_message(
-                    proc_id,
-                    "failed",
-                    "StartPairing requires a payload",
-                )]);
-            };
-            let request = match StartPairingRequest::decode(payload) {
-                Ok(request) => request,
-                Err(_) => {
-                    return Ok(vec![generic_error_message(
-                        proc_id,
-                        RpcErrorCode::MalformedPayload,
-                        "StartPairing payload is malformed",
-                    )]);
-                }
-            };
+    let response = match request {
+        RpcRequest::GetDaemonInfo => ok_payload_message(proc_id, DaemonInfo::current().encode()),
+        RpcRequest::StartPairing(request) => {
             let Some(confirmation_code) = normalize_confirmation_code(&request.confirmation_code)
             else {
                 return Ok(vec![generic_error_message(
@@ -2142,24 +2115,7 @@ async fn handle_rpc_messages_with_events(
                 .encode(),
             )
         }
-        id if id == ProcId::CompletePairing.as_u64() => {
-            let Some(payload) = payload else {
-                return Ok(vec![error_message(
-                    proc_id,
-                    "missing_payload",
-                    "CompletePairing requires a payload",
-                )]);
-            };
-            let request = match CompletePairingRequest::decode(payload) {
-                Ok(request) => request,
-                Err(_) => {
-                    return Ok(vec![generic_error_message(
-                        proc_id,
-                        RpcErrorCode::MalformedPayload,
-                        "CompletePairing payload is malformed",
-                    )]);
-                }
-            };
+        RpcRequest::CompletePairing(request) => {
             let now = now_unix();
             let current_session_id = rpc_session_id(&session_state).await;
             let pairing = {
@@ -2238,7 +2194,7 @@ async fn handle_rpc_messages_with_events(
                 .encode(),
             )
         }
-        id if id == ProcId::RenewClientCredential.as_u64() => {
+        RpcRequest::RenewClientCredential => {
             let Some(client_id) = authenticated_client_id(&session_state).await else {
                 return Ok(vec![unauthorized_message(proc_id)]);
             };
@@ -2269,70 +2225,15 @@ async fn handle_rpc_messages_with_events(
                 .encode(),
             )
         }
-        id if id == ProcId::CreateNodes.as_u64() => {
-            let Some(payload) = payload else {
-                return Ok(vec![error_message(
-                    proc_id,
-                    "missing_payload",
-                    "CreateNodes requires a payload",
-                )]);
-            };
-            let request = match CreateNodesReq::decode(payload) {
-                Ok(request) => request,
-                Err(_) => {
-                    return Ok(vec![generic_error_message(
-                        proc_id,
-                        RpcErrorCode::MalformedPayload,
-                        "CreateNodes payload is malformed",
-                    )]);
-                }
-            };
-            ok_payload_message(
-                proc_id,
-                create_nodes(files.as_ref(), request).await.encode(),
-            )
-        }
-        id if id == ProcId::RenamePaths.as_u64() => {
-            let Some(payload) = payload else {
-                return Ok(vec![error_message(
-                    proc_id,
-                    "missing_payload",
-                    "RenamePaths requires a payload",
-                )]);
-            };
-            let request = match RenamePathsReq::decode(payload) {
-                Ok(request) => request,
-                Err(_) => {
-                    return Ok(vec![generic_error_message(
-                        proc_id,
-                        RpcErrorCode::MalformedPayload,
-                        "RenamePaths payload is malformed",
-                    )]);
-                }
-            };
-            ok_payload_message(
-                proc_id,
-                rename_paths(files.as_ref(), request).await.encode(),
-            )
-        }
-        id if id == ProcId::DeletePaths.as_u64() => {
-            let Some(payload) = payload else {
-                return Ok(vec![error_message(
-                    proc_id,
-                    "missing_payload",
-                    "DeletePaths requires a payload",
-                )]);
-            };
-            let request = match DeletePathsReq::decode(payload) {
-                Ok(request) => request,
-                Err(_) => {
-                    return Ok(vec![generic_error_message(
-                        proc_id,
-                        RpcErrorCode::MalformedPayload,
-                        "DeletePaths payload is malformed",
-                    )]);
-                }
-            };
+        RpcRequest::CreateNodes(request) => ok_payload_message(
+            proc_id,
+            create_nodes(files.as_ref(), request).await.encode(),
+        ),
+        RpcRequest::RenamePaths(request) => ok_payload_message(
+            proc_id,
+            rename_paths(files.as_ref(), request).await.encode(),
+        ),
+        RpcRequest::DeletePaths(request) => {
             let mode = request.mode;
             let response = delete_paths(files.as_ref(), request).await;
             if mode == DeleteMode::Trash && bulk_mutation_has_ok(&response) {
@@ -2340,121 +2241,36 @@ async fn handle_rpc_messages_with_events(
             }
             ok_payload_message(proc_id, response.encode())
         }
-        id if id == ProcId::RestoreTrashItems.as_u64() => {
-            let Some(payload) = payload else {
-                return Ok(vec![error_message(
-                    proc_id,
-                    "missing_payload",
-                    "RestoreTrashItems requires a payload",
-                )]);
-            };
-            let request = match RestoreTrashItemsReq::decode(payload) {
-                Ok(request) => request,
-                Err(_) => {
-                    return Ok(vec![generic_error_message(
-                        proc_id,
-                        RpcErrorCode::MalformedPayload,
-                        "RestoreTrashItems payload is malformed",
-                    )]);
-                }
-            };
+        RpcRequest::RestoreTrashItems(request) => {
             let response = restore_trash_items(files.as_ref(), request).await;
             if bulk_mutation_has_ok(&response) {
                 notify_trash_changed(&trash_events);
             }
             ok_payload_message(proc_id, response.encode())
         }
-        id if id == ProcId::PurgeTrashItems.as_u64() => {
-            let Some(payload) = payload else {
-                return Ok(vec![error_message(
-                    proc_id,
-                    "missing_payload",
-                    "PurgeTrashItems requires a payload",
-                )]);
-            };
-            let request = match PurgeTrashItemsReq::decode(payload) {
-                Ok(request) => request,
-                Err(_) => {
-                    return Ok(vec![generic_error_message(
-                        proc_id,
-                        RpcErrorCode::MalformedPayload,
-                        "PurgeTrashItems payload is malformed",
-                    )]);
-                }
-            };
+        RpcRequest::PurgeTrashItems(request) => {
             let response = purge_trash_items(files.as_ref(), request).await;
             if bulk_mutation_has_ok(&response) {
                 notify_trash_changed(&trash_events);
             }
             ok_payload_message(proc_id, response.encode())
         }
-        id if id == ProcId::CreateTerminalSession.as_u64() => {
+        RpcRequest::CreateTerminalSession(request) => {
             let Some(client_id) = authenticated_client_id(&session_state).await else {
                 return Ok(vec![unauthorized_message(proc_id)]);
-            };
-            let Some(payload) = payload else {
-                return Ok(vec![generic_error_message(
-                    proc_id,
-                    RpcErrorCode::MissingPayload,
-                    "CreateTerminalSession requires a payload",
-                )]);
-            };
-            let request = match CreateTerminalSessionReq::decode(payload) {
-                Ok(request) => request,
-                Err(_) => {
-                    return Ok(vec![generic_error_message(
-                        proc_id,
-                        RpcErrorCode::MalformedPayload,
-                        "CreateTerminalSession payload is malformed",
-                    )]);
-                }
             };
             match terminals.create_session(request, client_id) {
                 Ok(session) => ok_payload_message(proc_id, session.encode()),
                 Err(err) => terminal_service_error_message(proc_id, err),
             }
         }
-        id if id == ProcId::TakeTerminalControl.as_u64() => {
-            let Some(payload) = payload else {
-                return Ok(vec![generic_error_message(
-                    proc_id,
-                    RpcErrorCode::MissingPayload,
-                    "TakeTerminalControl requires a payload",
-                )]);
-            };
-            let request = match TakeTerminalControlReq::decode(payload) {
-                Ok(request) => request,
-                Err(_) => {
-                    return Ok(vec![generic_error_message(
-                        proc_id,
-                        RpcErrorCode::MalformedPayload,
-                        "TakeTerminalControl payload is malformed",
-                    )]);
-                }
-            };
+        RpcRequest::TakeTerminalControl(request) => {
             match terminals.take_control(request, rpc_session_id(&session_state).await) {
                 Ok(response) => ok_payload_message(proc_id, response.encode()),
                 Err(err) => terminal_service_error_message(proc_id, err),
             }
         }
-        id if id == ProcId::CloseTerminalSession.as_u64() => {
-            let Some(payload) = payload else {
-                return Ok(vec![generic_error_message(
-                    proc_id,
-                    RpcErrorCode::MissingPayload,
-                    "CloseTerminalSession requires a payload",
-                )]);
-            };
-            let request = match CloseTerminalSessionReq::decode(payload) {
-                Ok(request) => request,
-                Err(_) => {
-                    return Ok(vec![generic_error_message(
-                        proc_id,
-                        RpcErrorCode::MalformedPayload,
-                        "CloseTerminalSession payload is malformed",
-                    )]);
-                }
-            };
+        RpcRequest::CloseTerminalSession(request) => {
             match terminals.close_session(&request.terminal_session_id) {
                 Ok(()) => ok_void_message(proc_id),
                 Err(err) => terminal_service_error_message(proc_id, err),
@@ -2879,6 +2695,26 @@ fn generic_error_message(_proc_id: u64, code: RpcErrorCode, message: &str) -> Re
     }
 }
 
+fn rpc_request_decode_error_message(proc_id: u64, err: RpcRequestDecodeError) -> ReqResMessage {
+    match err {
+        RpcRequestDecodeError::UnknownProcId(_) => generic_error_message(
+            proc_id,
+            RpcErrorCode::NotImplemented,
+            "this RPC is reserved but not implemented in the first cut",
+        ),
+        RpcRequestDecodeError::MissingPayload { proc } => generic_error_message(
+            proc_id,
+            RpcErrorCode::MissingPayload,
+            &format!("{} requires a payload", proc.name()),
+        ),
+        RpcRequestDecodeError::MalformedPayload { proc, .. } => generic_error_message(
+            proc_id,
+            RpcErrorCode::MalformedPayload,
+            &format!("{} payload is malformed", proc.name()),
+        ),
+    }
+}
+
 fn stream_generic_error_message(_proc_id: u64, code: RpcErrorCode, message: &str) -> ReqResMessage {
     ReqResMessage::ResponseStreamErrorEnd {
         error_kind: RpcErrorKind::System,
@@ -3054,8 +2890,8 @@ mod tests {
         CLIENT_CREDENTIAL_TTL_SECONDS, PAIRING_TTL_SECONDS,
     };
     use wgo_daemon_core::rpc::{
-        CreateNodeOp, DeleteMode, FsEntryKind, ReadFileReq, WriteFileChunk, WriteFileResult,
-        WriteFileStart,
+        CompletePairingRequest, CreateNodeOp, DeleteMode, FsEntryKind, ReadFileReq,
+        StartPairingRequest, WriteFileChunk, WriteFileResult, WriteFileStart,
     };
 
     #[test]
