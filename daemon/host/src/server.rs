@@ -182,7 +182,7 @@ async fn run_system_server_once(
     let client_credentials = Arc::new(Mutex::new(initial_client_credentials.clone()));
     let (client_credentials_events, _) = watch::channel(initial_client_credentials);
     let pairing_challenge = Arc::new(Mutex::new(PairingState::default()));
-    let terminals = Arc::new(TerminalManager::new());
+    let terminals = Arc::new(TerminalManager::new(shell_integration_dir(&config_path)));
     let (trash_events, _) = watch::channel(0);
 
     let resolver = Arc::new(ReloadingCertResolver::new(certificate.certified_key));
@@ -360,6 +360,10 @@ fn write_daemon_status(config_path: &Path, status: DaemonStatus<'_>) {
             "failed to write daemon status"
         );
     }
+}
+
+fn shell_integration_dir(config_path: &Path) -> PathBuf {
+    config_path.with_file_name("shell-integration")
 }
 
 #[derive(Debug)]
@@ -4394,7 +4398,9 @@ mod tests {
     }
 
     fn test_terminals() -> SharedTerminalManager {
-        Arc::new(TerminalManager::new())
+        Arc::new(TerminalManager::new(
+            std::env::temp_dir().join("WhatsGoingOn-test-shell-integration"),
+        ))
     }
 
     #[derive(Debug)]

@@ -1,13 +1,12 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{Read, Write};
-#[cfg(windows)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::shell_integration;
 use anyhow::Result;
 use portable_pty::{
     native_pty_system, Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize,
@@ -32,6 +31,7 @@ type SharedSession = Arc<Mutex<TerminalSession>>;
 #[derive(Clone)]
 pub struct TerminalManager {
     inner: Arc<TerminalManagerInner>,
+    shell_integration_dir: PathBuf,
 }
 
 struct TerminalManagerInner {
@@ -65,6 +65,7 @@ struct LaunchCommand {
     command: String,
     args: Vec<String>,
     cwd: Option<String>,
+    env: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +165,7 @@ fn parse_osc_metadata(text: &str) -> Option<TerminalMetadata> {
     match kind {
         "0" | "2" => non_empty_string(payload).map(TerminalMetadata::Title),
         "7" => parse_osc7_cwd(payload).map(TerminalMetadata::Cwd),
+        "633" => parse_osc633_metadata(payload),
         "9" => {
             let (subkind, cwd) = payload.split_once(';')?;
             if subkind == "9" {
@@ -172,6 +174,18 @@ fn parse_osc_metadata(text: &str) -> Option<TerminalMetadata> {
                 None
             }
         }
+        _ => None,
+    }
+}
+
+fn parse_osc633_metadata(payload: &str) -> Option<TerminalMetadata> {
+    let (kind, rest) = payload.split_once(';')?;
+    if kind != "P" {
+        return None;
+    }
+    let (name, value) = rest.split_once('=')?;
+    match name {
+        "Cwd" => non_empty_string(&unescape_osc633_value(value)).map(TerminalMetadata::Cwd),
         _ => None,
     }
 }
@@ -198,6 +212,33 @@ fn normalize_file_url_path(path: &str) -> Option<String> {
         }
     }
     non_empty_string(path)
+}
+
+fn unescape_osc633_value(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            if index + 1 < bytes.len() && bytes[index + 1] == b'\\' {
+                output.push(b'\\');
+                index += 2;
+                continue;
+            }
+            if index + 3 < bytes.len() && bytes[index + 1] == b'x' {
+                if let (Some(high), Some(low)) =
+                    (hex_value(bytes[index + 2]), hex_value(bytes[index + 3]))
+                {
+                    output.push((high << 4) | low);
+                    index += 4;
+                    continue;
+                }
+            }
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).into_owned()
 }
 
 fn percent_decode(text: &str) -> String {
@@ -243,7 +284,7 @@ fn non_empty_string(text: &str) -> Option<String> {
 }
 
 impl TerminalManager {
-    pub fn new() -> Self {
+    pub fn new(shell_integration_dir: PathBuf) -> Self {
         let (table_tx, _) = broadcast::channel(TERMINAL_TABLE_CHANNEL_CAPACITY);
         Self {
             inner: Arc::new(TerminalManagerInner {
@@ -252,6 +293,7 @@ impl TerminalManager {
                 next_attach_id: AtomicU64::new(1),
                 table_tx,
             }),
+            shell_integration_dir,
         }
     }
 
@@ -262,9 +304,12 @@ impl TerminalManager {
     ) -> Result<TerminalSessionInfo, ServiceError> {
         validate_size(request.cols, request.rows)?;
         let launch = resolve_launch(&request.launch)?;
-        let spawn_launch = terminal_spawn_launch(&launch);
+        let spawn_launch = self.terminal_spawn_launch(&launch);
         let mut command = CommandBuilder::new(&spawn_launch.command);
         command.args(&spawn_launch.args);
+        for (key, value) in &spawn_launch.env {
+            command.env(key, value);
+        }
         let initial_cwd = request
             .cwd
             .clone()
@@ -519,16 +564,24 @@ impl TerminalManager {
         let seq = guard.info.latest_output_seq.saturating_add(1);
         guard.info.latest_output_seq = seq;
         guard.info.last_output_at_ms = Some(current_unix_ms());
+        let mut metadata_changed = false;
         for event in &metadata {
             match event {
                 TerminalMetadata::Title(title) => {
-                    guard.info.last_known_title = Some(title.clone());
+                    if guard.info.last_known_title.as_deref() != Some(title) {
+                        guard.info.last_known_title = Some(title.clone());
+                        metadata_changed = true;
+                    }
                 }
                 TerminalMetadata::Cwd(cwd) => {
-                    guard.info.last_known_cwd = Some(cwd.clone());
+                    if guard.info.last_known_cwd.as_deref() != Some(cwd) {
+                        guard.info.last_known_cwd = Some(cwd.clone());
+                        metadata_changed = true;
+                    }
                 }
             }
         }
+        let updated_info = metadata_changed.then(|| guard.info.clone());
         guard.retained_output_bytes += bytes.len();
         guard.output_buffer.push_back(OutputRecord {
             seq,
@@ -554,6 +607,10 @@ impl TerminalManager {
                     .output_tx
                     .send(TerminalEvent::WorkingDirectoryChanged { cwd }),
             };
+        }
+        drop(guard);
+        if let Some(info) = updated_info {
+            self.broadcast_table_upsert(&info);
         }
         true
     }
@@ -718,10 +775,29 @@ fn resolve_launch(launch: &TerminalLaunchSpec) -> Result<LaunchCommand, ServiceE
         command: launch.command.clone(),
         args: launch.args.clone(),
         cwd: None,
+        env: Vec::new(),
     })
 }
 
-fn terminal_spawn_launch(launch: &LaunchCommand) -> LaunchCommand {
+impl TerminalManager {
+    fn terminal_spawn_launch(&self, launch: &LaunchCommand) -> LaunchCommand {
+        terminal_spawn_launch(launch, &self.shell_integration_dir)
+    }
+}
+
+fn terminal_spawn_launch(launch: &LaunchCommand, shell_integration_dir: &Path) -> LaunchCommand {
+    let integrated = shell_integration::integrate_shell_launch(
+        shell_integration_dir,
+        &launch.command,
+        &launch.args,
+    );
+    let launch = LaunchCommand {
+        command: integrated.command,
+        args: integrated.args,
+        cwd: launch.cwd.clone(),
+        env: integrated.env,
+    };
+
     #[cfg(target_os = "macos")]
     if should_spawn_terminal_as_macos_console_user() {
         if let Some(user) = macos_console_user_name() {
@@ -737,11 +813,12 @@ fn terminal_spawn_launch(launch: &LaunchCommand) -> LaunchCommand {
                 command: "/usr/bin/sudo".to_string(),
                 args,
                 cwd: launch.cwd.clone(),
+                env: launch.env.clone(),
             };
         }
     }
 
-    launch.clone()
+    launch
 }
 
 #[cfg(target_os = "macos")]
@@ -1207,8 +1284,26 @@ fn operation_failed(err: impl std::fmt::Display) -> ServiceError {
 
 #[cfg(test)]
 mod tests {
+    use super::{parse_osc_metadata, TerminalMetadata};
+
     #[cfg(target_os = "macos")]
     use super::parse_dscl_user_shell;
+
+    #[test]
+    fn parses_osc633_cwd_property() {
+        assert_eq!(
+            parse_osc_metadata("633;P;Cwd=C:\\\\Users\\\\user\\\\repo"),
+            Some(TerminalMetadata::Cwd("C:\\Users\\user\\repo".to_string()))
+        );
+    }
+
+    #[test]
+    fn parses_osc633_escaped_cwd_property() {
+        assert_eq!(
+            parse_osc_metadata("633;P;Cwd=/tmp/has\\x3bsemi"),
+            Some(TerminalMetadata::Cwd("/tmp/has;semi".to_string()))
+        );
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
