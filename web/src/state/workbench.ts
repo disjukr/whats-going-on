@@ -19,6 +19,7 @@ export interface WorkbenchTab {
   dirty?: boolean;
   filesView?: WorkbenchFilesView;
   id: string;
+  previousActiveTabId?: string;
   title: string;
   tool: WorkbenchTool;
   terminalLaunch?: TerminalLaunchSpec;
@@ -368,11 +369,10 @@ export const workbenchBunja = bunja(() => {
         activePaneId: paneId,
         panes: current.panes.map((pane) =>
           pane.id === paneId
-            ? {
-              ...pane,
-              activeTabId: tab.id,
-              tabs: insertTab(pane.tabs, tab, tabId, "after"),
-            }
+            ? activatePaneTab(
+              { ...pane, tabs: insertTab(pane.tabs, tab, tabId, "after") },
+              tab.id,
+            )
             : pane
         ),
       }),
@@ -387,7 +387,7 @@ export const workbenchBunja = bunja(() => {
         ...current,
         activePaneId: paneId,
         panes: current.panes.map((pane) =>
-          pane.id === paneId ? { ...pane, activeTabId: tabId } : pane
+          pane.id === paneId ? activatePaneTab(pane, tabId) : pane
         ),
       }),
     );
@@ -397,11 +397,12 @@ export const workbenchBunja = bunja(() => {
     updatePanes((current) =>
       current.map((pane) => {
         if (pane.id !== paneId || pane.tabs.length <= 1) return pane;
+        const closingTab = pane.tabs.find((tab) => tab.id === tabId);
         const tabs = pane.tabs.filter((tab) => tab.id !== tabId);
         const activeTabId = pane.activeTabId === tabId
-          ? tabs[0].id
+          ? fallbackActiveTabId(closingTab, tabs)
           : pane.activeTabId;
-        return { ...pane, tabs, activeTabId };
+        return normalizePaneTabHistory({ ...pane, tabs, activeTabId });
       })
     );
   }
@@ -443,15 +444,16 @@ export const workbenchBunja = bunja(() => {
         if (pane.id === sourcePaneId) {
           const tabs = pane.tabs.filter((tab) => tab.id !== tabId);
           if (tabs.length === 0) return [];
+          const closingTab = pane.tabs.find((tab) => tab.id === tabId);
           const activeTabId = pane.activeTabId === tabId
-            ? tabs[0]?.id ?? ""
+            ? fallbackActiveTabId(closingTab, tabs)
             : pane.activeTabId;
-          return [{ ...pane, tabs, activeTabId }];
+          return [normalizePaneTabHistory({ ...pane, tabs, activeTabId })];
         }
 
         if (pane.id === targetPaneId) {
           const tabs = insertTab(pane.tabs, movingTab, targetTabId, position);
-          return [{ ...pane, tabs, activeTabId: movingTab.id }];
+          return [activatePaneTab({ ...pane, tabs }, movingTab.id)];
         }
 
         return [pane];
@@ -492,7 +494,7 @@ export const workbenchBunja = bunja(() => {
 
       const newPane: WorkbenchPane = {
         id: newPaneId,
-        tabs: [movingTab],
+        tabs: [{ ...movingTab, previousActiveTabId: undefined }],
         activeTabId: movingTab.id,
       };
       const panes = current.panes.flatMap((pane) => {
@@ -501,10 +503,11 @@ export const workbenchBunja = bunja(() => {
         const tabs = pane.tabs.filter((tab) => tab.id !== tabId);
         if (tabs.length === 0) return [];
 
+        const closingTab = pane.tabs.find((tab) => tab.id === tabId);
         const activeTabId = pane.activeTabId === tabId
-          ? tabs[0].id
+          ? fallbackActiveTabId(closingTab, tabs)
           : pane.activeTabId;
-        return [{ ...pane, tabs, activeTabId }];
+        return [normalizePaneTabHistory({ ...pane, tabs, activeTabId })];
       });
 
       return {
@@ -764,7 +767,60 @@ function moveTabWithinPane(
 
   const remainingTabs = pane.tabs.filter((tab) => tab.id !== tabId);
   const tabs = insertTab(remainingTabs, movingTab, targetTabId, position);
-  return { ...pane, tabs, activeTabId: tabId };
+  return activatePaneTab({ ...pane, tabs }, tabId);
+}
+
+function activatePaneTab(pane: WorkbenchPane, tabId: string): WorkbenchPane {
+  if (!pane.tabs.some((tab) => tab.id === tabId)) {
+    return normalizePaneTabHistory(pane);
+  }
+  if (pane.activeTabId === tabId) {
+    return normalizePaneTabHistory(pane);
+  }
+  const previousActiveTabId =
+    pane.tabs.some((tab) => tab.id === pane.activeTabId)
+      ? pane.activeTabId
+      : undefined;
+  return normalizePaneTabHistory({
+    ...pane,
+    activeTabId: tabId,
+    tabs: pane.tabs.map((tab) =>
+      tab.id === tabId ? { ...tab, previousActiveTabId } : tab
+    ),
+  });
+}
+
+function fallbackActiveTabId(
+  closingTab: WorkbenchTab | undefined,
+  tabs: WorkbenchTab[],
+): string {
+  const previousActiveTabId = closingTab?.previousActiveTabId;
+  if (
+    previousActiveTabId &&
+    tabs.some((tab) => tab.id === previousActiveTabId)
+  ) {
+    return previousActiveTabId;
+  }
+  return tabs[0]?.id ?? "";
+}
+
+function normalizePaneTabHistory(pane: WorkbenchPane): WorkbenchPane {
+  const tabIds = new Set(pane.tabs.map((tab) => tab.id));
+  const activeTabId = tabIds.has(pane.activeTabId)
+    ? pane.activeTabId
+    : pane.tabs[0]?.id ?? "";
+  const tabs = pane.tabs.map((tab) => {
+    if (
+      tab.previousActiveTabId &&
+      tab.previousActiveTabId !== tab.id &&
+      tabIds.has(tab.previousActiveTabId)
+    ) {
+      return tab;
+    }
+    if (tab.previousActiveTabId === undefined) return tab;
+    return { ...tab, previousActiveTabId: undefined };
+  });
+  return { ...pane, activeTabId, tabs };
 }
 
 function insertTab(
@@ -853,16 +909,12 @@ function openToolTabInActivePane(
     const existingTab = pane.tabs.find((tab) => tab.tool === tool);
     if (existingTab) {
       opened = true;
-      return { ...pane, activeTabId: existingTab.id };
+      return activatePaneTab(pane, existingTab.id);
     }
 
     const tab = createWorkbenchTab(tool);
     opened = true;
-    return {
-      ...pane,
-      tabs: [...pane.tabs, tab],
-      activeTabId: tab.id,
-    };
+    return activatePaneTab({ ...pane, tabs: [...pane.tabs, tab] }, tab.id);
   });
 
   if (!opened) return state;
@@ -892,11 +944,7 @@ function openTabInPane(
     activePaneId: paneId,
     panes: state.panes.map((pane) =>
       pane.id === paneId
-        ? {
-          ...pane,
-          tabs: [...pane.tabs, tab],
-          activeTabId: tab.id,
-        }
+        ? activatePaneTab({ ...pane, tabs: [...pane.tabs, tab] }, tab.id)
         : pane
     ),
   };
@@ -929,6 +977,7 @@ function cloneWorkbenchTab(tab: WorkbenchTab): WorkbenchTab {
     ...tab,
     dirty: undefined,
     id: `${tab.tool}-${crypto.randomUUID()}`,
+    previousActiveTabId: undefined,
   };
 }
 
