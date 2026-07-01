@@ -2,17 +2,15 @@ import { createContext } from "react";
 import type React from "react";
 import type { Atom } from "jotai";
 import type { FsEntry } from "../../../../protocol/generated/rpc.ts";
-import type { ExplorerSpecialLocation } from "../../../../state/explorer.ts";
-
-export interface FilesExplorerHistoryEntry {
-  path?: string;
-  openedFile?: FsEntry;
-}
+import type {
+  ExplorerLocation,
+  ExplorerSpecialLocation,
+} from "../../../../state/explorer.ts";
 
 export interface FilesExplorerState {
   currentPathAtom: Atom<string | undefined>;
   displayPathAtom: Atom<string | undefined>;
-  historyAtom: Atom<FilesExplorerHistoryEntry[]>;
+  historyAtom: Atom<ExplorerLocation[]>;
   openedFileAtom: Atom<FsEntry | undefined>;
   selectedEntryAtom: Atom<FsEntry | undefined>;
   selectedPathAtom: Atom<string | undefined>;

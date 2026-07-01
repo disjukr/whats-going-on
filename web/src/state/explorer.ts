@@ -1,5 +1,5 @@
 import { bunja, createScope } from "bunja";
-import { atom, type PrimitiveAtom, type SetStateAction } from "jotai";
+import { atom, type PrimitiveAtom } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import { type JotaiStore, JotaiStoreScope } from "unsaturated/store";
 import { isInvalidCredentialsError } from "../protocol/client.ts";
@@ -26,17 +26,15 @@ export const trashLocationPath = "wgo://trash";
 
 export type ExplorerSpecialLocation = "trash";
 
-interface ExplorerNavigationState {
-  currentPath?: string;
-  history: ExplorerHistoryEntry[];
-  openedFile?: FsEntry;
-  specialLocation?: ExplorerSpecialLocation;
-}
+export type ExplorerLocation =
+  | { type: "root" }
+  | { type: "directory"; path: string }
+  | { type: "file"; directoryPath?: string; entry: FsEntry }
+  | { type: "trash" };
 
-interface ExplorerHistoryEntry {
-  path?: string;
-  openedFile?: FsEntry;
-  specialLocation?: ExplorerSpecialLocation;
+interface ExplorerNavigationState {
+  history: ExplorerLocation[];
+  location: ExplorerLocation;
 }
 
 export const explorerMachineBunja = bunja(() => {
@@ -76,65 +74,28 @@ export const explorerNavigationBunja = bunja(() => {
 
   const navigationStateAtom = atomWithStorage<ExplorerNavigationState>(
     explorerNavigationStorageKey(machineId, paneScopeId),
-    { history: [] },
+    { history: [], location: { type: "root" } },
     undefined,
     { getOnInit: true },
   );
-  const currentPathAtom = atom(
-    (get) => get(navigationStateAtom).currentPath,
-    (get, set, update: SetStateAction<string | undefined>) => {
-      const next = resolveSetStateAction(
-        update,
-        get(navigationStateAtom).currentPath,
-      );
-      set(navigationStateAtom, (current) => ({
-        ...current,
-        currentPath: next,
-      }));
-    },
+  const locationAtom = atom((get) => get(navigationStateAtom).location);
+  const currentPathAtom = atom((get) =>
+    currentPathFromLocation(get(locationAtom))
   );
-  const openedFileAtom = atom(
-    (get) => get(navigationStateAtom).openedFile,
-    (get, set, update: SetStateAction<FsEntry | undefined>) => {
-      const next = resolveSetStateAction(
-        update,
-        get(navigationStateAtom).openedFile,
-      );
-      set(navigationStateAtom, (current) => ({
-        ...current,
-        openedFile: next,
-      }));
-    },
+  const directoryPathAtom = atom((get) =>
+    directoryPathFromLocation(get(locationAtom))
   );
+  const openedFileAtom = atom((get) => {
+    const location = get(locationAtom);
+    return location.type === "file" ? location.entry : undefined;
+  });
   const displayPathAtom = atom((get) =>
-    get(specialLocationAtom) === "trash"
-      ? trashLocationPath
-      : get(openedFileAtom)?.path ?? get(currentPathAtom)
+    displayPathFromLocation(get(locationAtom))
   );
-  const specialLocationAtom = atom(
-    (get) => get(navigationStateAtom).specialLocation,
-    (get, set, update: SetStateAction<ExplorerSpecialLocation | undefined>) => {
-      const next = resolveSetStateAction(
-        update,
-        get(navigationStateAtom).specialLocation,
-      );
-      set(navigationStateAtom, (current) => ({
-        ...current,
-        specialLocation: next,
-      }));
-    },
+  const specialLocationAtom = atom((get): ExplorerSpecialLocation | undefined =>
+    get(locationAtom).type === "trash" ? "trash" : undefined
   );
-  const historyAtom = atom(
-    (get) => get(navigationStateAtom).history,
-    (get, set, update: SetStateAction<ExplorerHistoryEntry[]>) => {
-      const currentHistory = get(navigationStateAtom).history;
-      const next = resolveSetStateAction(update, currentHistory);
-      set(navigationStateAtom, (current) => ({
-        ...current,
-        history: next,
-      }));
-    },
-  );
+  const historyAtom = atom((get) => get(navigationStateAtom).history);
   const selectedPathAtom = atom<string | undefined>(undefined);
 
   function selectEntry(entry: FsEntry) {
@@ -146,59 +107,67 @@ export const explorerNavigationBunja = bunja(() => {
       navigateTrash();
       return;
     }
-    store.set(
-      historyAtom,
-      (current) => [...current, currentLocation()],
-    );
-    store.set(currentPathAtom, path);
-    store.set(openedFileAtom, undefined);
-    store.set(specialLocationAtom, undefined);
+    navigateTo(locationFromPath(path));
+  }
+
+  function navigateTo(location: ExplorerLocation) {
+    store.set(navigationStateAtom, (current) => ({
+      history: [...current.history, current.location],
+      location,
+    }));
     store.set(selectedPathAtom, undefined);
   }
 
   function navigateTrash() {
-    store.set(
-      historyAtom,
-      (current) => [...current, currentLocation()],
-    );
-    store.set(openedFileAtom, undefined);
-    store.set(specialLocationAtom, "trash");
+    navigateTo({ type: "trash" });
+  }
+
+  function replaceWithLocation(location: ExplorerLocation) {
+    store.set(navigationStateAtom, (current) => ({
+      ...current,
+      location,
+    }));
     store.set(selectedPathAtom, undefined);
   }
 
   function replaceWithTrash() {
-    store.set(openedFileAtom, undefined);
-    store.set(specialLocationAtom, "trash");
-    store.set(selectedPathAtom, undefined);
+    replaceWithLocation({ type: "trash" });
   }
 
   function replaceWithPath(path?: string) {
-    store.set(currentPathAtom, path);
-    store.set(openedFileAtom, undefined);
-    store.set(specialLocationAtom, undefined);
+    replaceWithLocation(locationFromPath(path));
+  }
+
+  function replaceWithMovedDirectory(path?: string) {
+    store.set(navigationStateAtom, {
+      history: [],
+      location: locationFromPath(path),
+    });
     store.set(selectedPathAtom, undefined);
   }
 
   function goBack() {
-    const history = store.get(historyAtom);
+    const history = store.get(navigationStateAtom).history;
     if (history.length === 0) return;
     const next = history[history.length - 1];
-    store.set(currentPathAtom, next.path);
-    store.set(openedFileAtom, next.openedFile);
-    store.set(specialLocationAtom, next.specialLocation);
-    store.set(selectedPathAtom, next.openedFile?.path);
-    store.set(historyAtom, history.slice(0, -1));
+    store.set(navigationStateAtom, {
+      history: history.slice(0, -1),
+      location: next,
+    });
+    store.set(
+      selectedPathAtom,
+      next.type === "file" ? next.entry.path : undefined,
+    );
   }
 
   function goUp() {
-    if (store.get(specialLocationAtom) === "trash") return;
-    if (store.get(openedFileAtom)) {
-      navigate(store.get(currentPathAtom));
+    const location = store.get(locationAtom);
+    if (location.type === "trash" || location.type === "root") return;
+    if (location.type === "file") {
+      navigate(location.directoryPath);
       return;
     }
-    const currentPath = store.get(currentPathAtom);
-    if (!currentPath) return;
-    navigate(parentPath(currentPath));
+    navigate(parentPath(location.path));
   }
 
   function openEntry(entry: FsEntry) {
@@ -206,29 +175,20 @@ export const explorerNavigationBunja = bunja(() => {
       navigate(entry.path);
       return;
     }
-    store.set(specialLocationAtom, undefined);
     store.set(selectedPathAtom, entry.path);
   }
 
   function openFile(entry: FsEntry) {
-    store.set(
-      historyAtom,
-      (current) => [...current, currentLocation()],
-    );
-    store.set(openedFileAtom, entry);
-    store.set(specialLocationAtom, undefined);
+    navigateTo({
+      type: "file",
+      directoryPath: directoryPathFromLocation(store.get(locationAtom)),
+      entry,
+    });
     store.set(selectedPathAtom, entry.path);
   }
 
-  function currentLocation(): ExplorerHistoryEntry {
-    return {
-      path: store.get(currentPathAtom),
-      openedFile: store.get(openedFileAtom),
-      specialLocation: store.get(specialLocationAtom),
-    };
-  }
-
   return {
+    directoryPathAtom,
     currentPathAtom,
     displayPathAtom,
     historyAtom,
@@ -239,6 +199,7 @@ export const explorerNavigationBunja = bunja(() => {
     navigate,
     navigateTrash,
     replaceWithPath,
+    replaceWithMovedDirectory,
     replaceWithTrash,
     goBack,
     goUp,
@@ -360,8 +321,7 @@ export const explorerDirectoryBunja = bunja(() => {
     [
       get(machineState.connectionKeyAtom),
       get(machineState.isPairedAtom) ? "paired" : "unpaired",
-      get(navigation.currentPathAtom) ?? "",
-      get(navigation.specialLocationAtom) ?? "",
+      get(navigation.directoryPathAtom) ?? "",
       get(refresh.refreshAtom),
     ].join("\n")
   );
@@ -376,10 +336,9 @@ export const explorerDirectoryBunja = bunja(() => {
       store.set(navigation.selectedPathAtom, undefined);
 
       const machine = store.get(machineState.machineAtom);
-      const currentPath = store.get(navigation.currentPathAtom);
+      const directoryPath = store.get(navigation.directoryPathAtom);
       if (
-        !machine || !store.get(machineState.isPairedAtom) || !currentPath ||
-        store.get(navigation.specialLocationAtom)
+        !machine || !store.get(machineState.isPairedAtom) || !directoryPath
       ) {
         store.set(directoryStateAtom, {
           phase: "idle",
@@ -402,7 +361,7 @@ export const explorerDirectoryBunja = bunja(() => {
         try {
           const transport = await rpcSession.webTransport();
           if (cancelled) return;
-          iterator = subscribeDirectory(transport, { path: currentPath });
+          iterator = subscribeDirectory(transport, { path: directoryPath });
           for await (const event of iterator) {
             if (cancelled) break;
             applyDirectoryEvent(
@@ -411,11 +370,7 @@ export const explorerDirectoryBunja = bunja(() => {
               directoryRowsAtom,
               directoryStateAtom,
               (path) => {
-                if (path) {
-                  store.set(navigation.currentPathAtom, path);
-                  store.set(navigation.openedFileAtom, undefined);
-                  store.set(navigation.historyAtom, []);
-                }
+                navigation.replaceWithMovedDirectory(path);
               },
             );
           }
@@ -466,11 +421,12 @@ export const explorerBunja = bunja(() => {
   const directory = bunja.use(explorerDirectoryBunja);
   const refresh = bunja.use(explorerRefreshBunja);
 
-  const rowsAtom = atom((get) =>
-    get(navigation.currentPathAtom)
-      ? get(directory.directoryRowsAtom)
-      : get(roots.rootsAtom)
-  );
+  const rowsAtom = atom((get) => {
+    if (get(navigation.directoryPathAtom)) {
+      return get(directory.directoryRowsAtom);
+    }
+    return get(navigation.specialLocationAtom) ? [] : get(roots.rootsAtom);
+  });
   const openedFileAtom = atom((get) => {
     const openedFile = get(navigation.openedFileAtom);
     if (!openedFile) return undefined;
@@ -486,6 +442,7 @@ export const explorerBunja = bunja(() => {
 
   return {
     currentPathAtom: navigation.currentPathAtom,
+    directoryPathAtom: navigation.directoryPathAtom,
     displayPathAtom: navigation.displayPathAtom,
     historyAtom: navigation.historyAtom,
     openedFileAtom,
@@ -498,6 +455,7 @@ export const explorerBunja = bunja(() => {
     navigate: navigation.navigate,
     navigateTrash: navigation.navigateTrash,
     replaceWithPath: navigation.replaceWithPath,
+    replaceWithMovedDirectory: navigation.replaceWithMovedDirectory,
     replaceWithTrash: navigation.replaceWithTrash,
     goBack: navigation.goBack,
     goUp: navigation.goUp,
@@ -532,7 +490,7 @@ function explorerNavigationStorageKey(
   machineId: string | undefined,
   paneScopeId: string,
 ): string {
-  return `wgo.explorer.navigation.${machineId ?? "none"}.${paneScopeId}.v1`;
+  return `wgo.explorer.navigation.${machineId ?? "none"}.${paneScopeId}.v2`;
 }
 
 export function copyExplorerNavigationState(
@@ -571,9 +529,12 @@ export function writeExplorerFileNavigationState(
     const storage = globalThis.localStorage;
     const targetKey = explorerNavigationStorageKey(machineId, paneScopeId);
     const state: ExplorerNavigationState = {
-      currentPath,
       history: [],
-      openedFile,
+      location: {
+        type: "file",
+        directoryPath: currentPath,
+        entry: openedFile,
+      },
     };
     storage.setItem(targetKey, JSON.stringify(state));
   } catch {
@@ -581,13 +542,39 @@ export function writeExplorerFileNavigationState(
   }
 }
 
-function resolveSetStateAction<Value>(
-  action: SetStateAction<Value>,
-  current: Value,
-): Value {
-  return typeof action === "function"
-    ? (action as (current: Value) => Value)(current)
-    : action;
+function locationFromPath(path?: string): ExplorerLocation {
+  return path ? { type: "directory", path } : { type: "root" };
+}
+
+function currentPathFromLocation(
+  location: ExplorerLocation,
+): string | undefined {
+  if (location.type === "directory") return location.path;
+  if (location.type === "file") return location.directoryPath;
+  return undefined;
+}
+
+function directoryPathFromLocation(
+  location: ExplorerLocation,
+): string | undefined {
+  if (location.type === "directory") return location.path;
+  if (location.type === "file") return location.directoryPath;
+  return undefined;
+}
+
+function displayPathFromLocation(
+  location: ExplorerLocation,
+): string | undefined {
+  switch (location.type) {
+    case "root":
+      return undefined;
+    case "directory":
+      return location.path;
+    case "file":
+      return location.entry.path;
+    case "trash":
+      return trashLocationPath;
+  }
 }
 
 function applyRootsEvent(
