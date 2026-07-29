@@ -5,9 +5,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, Implementation, InitializeRequest, NewSessionRequest, PromptRequest,
+    BooleanConfigOptionCapabilities, ClientCapabilities, ClientSessionCapabilities, ContentBlock,
+    Implementation, InitializeRequest, LoadSessionRequest, NewSessionRequest, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SessionNotification, SessionUpdate, StopReason,
+    ResumeSessionRequest, SessionConfigOption, SessionConfigOptionValue,
+    SessionConfigOptionsCapabilities, SessionId, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, StopReason,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo};
@@ -19,6 +22,13 @@ pub struct AgentRuntimeConfig {
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub cwd: PathBuf,
+    pub session: AgentRuntimeSession,
+}
+
+#[derive(Debug, Clone)]
+pub enum AgentRuntimeSession {
+    New,
+    Existing { provider_session_id: String },
 }
 
 #[derive(Debug, Clone)]
@@ -28,9 +38,11 @@ pub struct AgentRuntimeReady {
     pub agent_title: Option<String>,
     pub agent_version: Option<String>,
     pub load_session: bool,
+    pub resume_session: bool,
     pub image_prompt: bool,
     pub audio_prompt: bool,
     pub embedded_context: bool,
+    pub config_options: Vec<SessionConfigOption>,
 }
 
 #[derive(Debug)]
@@ -42,6 +54,9 @@ pub enum AgentRuntimeEvent {
     Usage {
         used: u64,
         size: u64,
+    },
+    ConfigOptions {
+        options: Vec<SessionConfigOption>,
     },
     PromptFinished {
         turn_id: String,
@@ -62,6 +77,11 @@ enum AgentRuntimeCommand {
         turn_id: String,
         content: Vec<ContentBlock>,
     },
+    SetConfig {
+        config_id: String,
+        value: SessionConfigOptionValue,
+        response: oneshot::Sender<Result<Vec<SessionConfigOption>, String>>,
+    },
 }
 
 #[derive(Clone)]
@@ -74,6 +94,24 @@ impl AgentRuntimeHandle {
         self.commands
             .send(AgentRuntimeCommand::Prompt { turn_id, content })
             .map_err(|_| "agent runtime is no longer available".to_string())
+    }
+
+    pub async fn set_config(
+        &self,
+        config_id: String,
+        value: SessionConfigOptionValue,
+    ) -> Result<Vec<SessionConfigOption>, String> {
+        let (response, result) = oneshot::channel();
+        self.commands
+            .send(AgentRuntimeCommand::SetConfig {
+                config_id,
+                value,
+                response,
+            })
+            .map_err(|_| "agent runtime is no longer available".to_string())?;
+        result
+            .await
+            .map_err(|_| "agent runtime exited before changing the configuration".to_string())?
     }
 }
 
@@ -142,6 +180,11 @@ async fn run_agent_runtime(
                             size: usage.size,
                         });
                     }
+                    SessionUpdate::ConfigOptionUpdate(update) => {
+                        let _ = notification_events.send(AgentRuntimeEvent::ConfigOptions {
+                            options: update.config_options,
+                        });
+                    }
                     _ => {}
                 }
                 Ok(())
@@ -159,28 +202,82 @@ async fn run_agent_runtime(
         .connect_with(agent, |connection: ConnectionTo<Agent>| async move {
             let initialize = connection
                 .send_request(
-                    InitializeRequest::new(ProtocolVersion::V1).client_info(
-                        Implementation::new("rieul-daemon", env!("CARGO_PKG_VERSION"))
-                            .title("Rieul Daemon"),
-                    ),
+                    InitializeRequest::new(ProtocolVersion::V1)
+                        .client_capabilities(
+                            ClientCapabilities::new().session(
+                                ClientSessionCapabilities::new().config_options(
+                                    SessionConfigOptionsCapabilities::new()
+                                        .boolean(BooleanConfigOptionCapabilities::new()),
+                                ),
+                            ),
+                        )
+                        .client_info(
+                            Implementation::new("rieul-daemon", env!("CARGO_PKG_VERSION"))
+                                .title("Rieul Daemon"),
+                        ),
                 )
-                .block_task()
-                .await?;
-            let session = connection
-                .send_request(NewSessionRequest::new(config.cwd))
                 .block_task()
                 .await?;
             let agent_info = initialize.agent_info;
             let capabilities = initialize.agent_capabilities;
+            let resume_session = capabilities.session_capabilities.resume.is_some();
+            let (session_id, config_options): (SessionId, Vec<SessionConfigOption>) =
+                match config.session {
+                    AgentRuntimeSession::New => {
+                        let response = connection
+                            .send_request(NewSessionRequest::new(config.cwd))
+                            .block_task()
+                            .await?;
+                        (
+                            response.session_id,
+                            response.config_options.unwrap_or_default(),
+                        )
+                    }
+                    AgentRuntimeSession::Existing {
+                        provider_session_id,
+                    } if resume_session => {
+                        let session_id = SessionId::from(provider_session_id);
+                        let response = connection
+                            .send_request(ResumeSessionRequest::new(session_id.clone(), config.cwd))
+                            .block_task()
+                            .await?;
+                        (session_id, response.config_options.unwrap_or_default())
+                    }
+                    AgentRuntimeSession::Existing {
+                        provider_session_id,
+                    } if capabilities.load_session => {
+                        let session_id = SessionId::from(provider_session_id);
+                        let response = connection
+                            .send_request(LoadSessionRequest::new(session_id.clone(), config.cwd))
+                            .block_task()
+                            .await?;
+                        (session_id, response.config_options.unwrap_or_default())
+                    }
+                    AgentRuntimeSession::Existing { .. } => {
+                        let ready = connection_ready
+                            .lock()
+                            .ok()
+                            .and_then(|mut ready| ready.take());
+                        if let Some(ready) = ready {
+                            let _ = ready.send(Err(
+                                "ACP agent supports neither session/resume nor session/load"
+                                    .to_string(),
+                            ));
+                        }
+                        return Ok(());
+                    }
+                };
             let runtime_ready = AgentRuntimeReady {
-                provider_session_id: session.session_id.to_string(),
+                provider_session_id: session_id.to_string(),
                 agent_name: agent_info.as_ref().map(|info| info.name.clone()),
                 agent_title: agent_info.as_ref().and_then(|info| info.title.clone()),
                 agent_version: agent_info.as_ref().map(|info| info.version.clone()),
                 load_session: capabilities.load_session,
+                resume_session,
                 image_prompt: capabilities.prompt_capabilities.image,
                 audio_prompt: capabilities.prompt_capabilities.audio,
                 embedded_context: capabilities.prompt_capabilities.embedded_context,
+                config_options,
             };
             let ready = connection_ready
                 .lock()
@@ -200,7 +297,7 @@ async fn run_agent_runtime(
                             *current = Some(turn_id.clone());
                         }
                         let response = connection
-                            .send_request(PromptRequest::new(session.session_id.clone(), content))
+                            .send_request(PromptRequest::new(session_id.clone(), content))
                             .block_task()
                             .await;
                         if let Ok(mut current) = active_turn.lock() {
@@ -220,6 +317,23 @@ async fn run_agent_runtime(
                                 });
                             }
                         }
+                    }
+                    AgentRuntimeCommand::SetConfig {
+                        config_id,
+                        value,
+                        response,
+                    } => {
+                        let result = connection
+                            .send_request(SetSessionConfigOptionRequest::new(
+                                session_id.clone(),
+                                config_id,
+                                value,
+                            ))
+                            .block_task()
+                            .await
+                            .map(|response| response.config_options)
+                            .map_err(|error| error.to_string());
+                        let _ = response.send(result);
                     }
                 }
             }
@@ -326,6 +440,7 @@ fn windows_executable_extensions(environment: &BTreeMap<String, String>) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::v1::{SessionConfigKind, SessionConfigOptionCategory};
     use serde_json::Value;
     use std::time::Duration;
 
@@ -394,6 +509,7 @@ mod tests {
                 args,
                 env: BTreeMap::new(),
                 cwd: workspace.path().to_path_buf(),
+                session: AgentRuntimeSession::New,
             },
             events_tx,
         )
@@ -424,7 +540,7 @@ mod tests {
                     AgentRuntimeEvent::Exited { message } => {
                         panic!("Codex ACP exited before completing the turn: {message:?}")
                     }
-                    AgentRuntimeEvent::Usage { .. } => {}
+                    AgentRuntimeEvent::Usage { .. } | AgentRuntimeEvent::ConfigOptions { .. } => {}
                 }
             }
             panic!("Codex ACP event stream closed before completing the turn")
@@ -433,5 +549,178 @@ mod tests {
         .expect("Codex ACP text turn timed out");
 
         assert_eq!(reply, "RIEUL_ACP_PROBE_OK");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an installed, authenticated Codex ACP adapter"]
+    async fn resumes_private_data_free_session_against_real_codex_acp() {
+        async fn prompt_reply(
+            runtime: &AgentRuntimeHandle,
+            events: &mut mpsc::UnboundedReceiver<AgentRuntimeEvent>,
+            turn_id: &str,
+            prompt: &str,
+        ) -> String {
+            runtime
+                .prompt(
+                    turn_id.to_string(),
+                    vec![ContentBlock::Text(
+                        agent_client_protocol::schema::v1::TextContent::new(prompt),
+                    )],
+                )
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(120), async {
+                let mut reply = String::new();
+                while let Some(event) = events.recv().await {
+                    match event {
+                        AgentRuntimeEvent::AgentTextChunk {
+                            turn_id: event_turn_id,
+                            text,
+                        } if event_turn_id == turn_id => reply.push_str(&text),
+                        AgentRuntimeEvent::PromptFinished {
+                            turn_id: event_turn_id,
+                            stop_reason,
+                        } if event_turn_id == turn_id => {
+                            assert_eq!(stop_reason, StopReason::EndTurn);
+                            return reply;
+                        }
+                        AgentRuntimeEvent::PromptFailed {
+                            turn_id: event_turn_id,
+                            message,
+                        } if event_turn_id == turn_id => panic!("{message}"),
+                        AgentRuntimeEvent::Exited { message } => {
+                            panic!("Codex ACP exited before completing the turn: {message:?}")
+                        }
+                        _ => {}
+                    }
+                }
+                panic!("Codex ACP event stream closed before completing the turn")
+            })
+            .await
+            .expect("Codex ACP turn timed out")
+        }
+
+        let command = std::env::var("RIEUL_TEST_CODEX_ACP_COMMAND")
+            .expect("set RIEUL_TEST_CODEX_ACP_COMMAND to the Codex ACP adapter executable");
+        let args = std::env::var("RIEUL_TEST_CODEX_ACP_ARGS")
+            .ok()
+            .map(|args| serde_json::from_str::<Vec<String>>(&args).unwrap())
+            .unwrap_or_default();
+        let workspace = tempfile::tempdir().unwrap();
+        let (first_events_tx, mut first_events) = mpsc::unbounded_channel();
+        let (first_runtime, first_ready) = start_agent_runtime(
+            AgentRuntimeConfig {
+                command: command.clone(),
+                args: args.clone(),
+                env: BTreeMap::new(),
+                cwd: workspace.path().to_path_buf(),
+                session: AgentRuntimeSession::New,
+            },
+            first_events_tx,
+        )
+        .await
+        .unwrap();
+        assert!(
+            first_ready.resume_session || first_ready.load_session,
+            "Codex ACP did not advertise a persistent session capability"
+        );
+        let provider_session_id = first_ready.provider_session_id.clone();
+        let first_reply = prompt_reply(
+            &first_runtime,
+            &mut first_events,
+            "turn-store-synthetic",
+            "Remember the identifier RIEUL_ACP_REATTACH_MEMORY. Reply with exactly RIEUL_ACP_REATTACH_STORED.",
+        )
+        .await;
+        assert_eq!(first_reply, "RIEUL_ACP_REATTACH_STORED");
+        drop(first_runtime);
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while let Some(event) = first_events.recv().await {
+                if matches!(event, AgentRuntimeEvent::Exited { .. }) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("first Codex ACP runtime did not exit");
+
+        let (resumed_events_tx, mut resumed_events) = mpsc::unbounded_channel();
+        let (resumed_runtime, resumed_ready) = start_agent_runtime(
+            AgentRuntimeConfig {
+                command,
+                args,
+                env: BTreeMap::new(),
+                cwd: workspace.path().to_path_buf(),
+                session: AgentRuntimeSession::Existing {
+                    provider_session_id: provider_session_id.clone(),
+                },
+            },
+            resumed_events_tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed_ready.provider_session_id, provider_session_id);
+        let resumed_reply = prompt_reply(
+            &resumed_runtime,
+            &mut resumed_events,
+            "turn-recall-synthetic",
+            "What identifier did I ask you to remember? Reply with only the identifier.",
+        )
+        .await;
+        assert_eq!(resumed_reply, "RIEUL_ACP_REATTACH_MEMORY");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an installed, authenticated Codex ACP adapter"]
+    async fn changes_reasoning_effort_against_real_codex_acp() {
+        let command = std::env::var("RIEUL_TEST_CODEX_ACP_COMMAND")
+            .expect("set RIEUL_TEST_CODEX_ACP_COMMAND to the Codex ACP adapter executable");
+        let args = std::env::var("RIEUL_TEST_CODEX_ACP_ARGS")
+            .ok()
+            .map(|args| serde_json::from_str::<Vec<String>>(&args).unwrap())
+            .unwrap_or_default();
+        let workspace = tempfile::tempdir().unwrap();
+        let (events_tx, _events_rx) = mpsc::unbounded_channel();
+        let (runtime, ready) = start_agent_runtime(
+            AgentRuntimeConfig {
+                command,
+                args,
+                env: BTreeMap::new(),
+                cwd: workspace.path().to_path_buf(),
+                session: AgentRuntimeSession::New,
+            },
+            events_tx,
+        )
+        .await
+        .unwrap();
+        let (config_id, current_value) = ready
+            .config_options
+            .iter()
+            .find_map(|option| {
+                if option.category != Some(SessionConfigOptionCategory::ThoughtLevel) {
+                    return None;
+                }
+                let SessionConfigKind::Select(select) = &option.kind else {
+                    return None;
+                };
+                Some((option.id.to_string(), select.current_value.to_string()))
+            })
+            .expect("Codex ACP did not expose a thought-level select option");
+
+        let options = runtime
+            .set_config(
+                config_id.clone(),
+                SessionConfigOptionValue::value_id(current_value.clone()),
+            )
+            .await
+            .unwrap();
+
+        assert!(options.iter().any(|option| {
+            option.id.to_string() == config_id
+                && matches!(
+                    &option.kind,
+                    SessionConfigKind::Select(select)
+                        if select.current_value.to_string() == current_value
+                )
+        }));
     }
 }

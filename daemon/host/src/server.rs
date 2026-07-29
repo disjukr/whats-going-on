@@ -17,9 +17,10 @@ use rieul_daemon_core::config::{
     ClientCredentials, SystemConfig,
 };
 use rieul_daemon_core::generated::rpc::{
-    AgentProjectsTableEvent, AgentProvidersTableEvent, AgentSessionEvent, CreateAgentProjectReq,
-    CreateAgentSessionReq, CreateAgentTurnReq, ListAgentSessionsReq, RemoveAgentProjectReq,
-    SubscribeAgentSessionReq, WriteFileReq as GeneratedWriteFileReq,
+    AgentProjectsTableEvent, AgentProvidersTableEvent, AgentSessionEvent, AttachAgentSessionReq,
+    CreateAgentProjectReq, CreateAgentSessionReq, CreateAgentTurnReq, ListAgentSessionTurnsReq,
+    ListAgentSessionsReq, RemoveAgentProjectReq, SetAgentSessionConfigReq,
+    SubscribeAgentSessionReq, UpdateAgentSessionReq, WriteFileReq as GeneratedWriteFileReq,
     WriteTerminalInputReq as GeneratedWriteTerminalInputReq,
 };
 use rieul_daemon_core::pairing::{
@@ -1050,8 +1051,12 @@ fn build_rpc_handlers(
         .subscribe_agent_projects(HostRpcHandler::subscribe_agent_projects_rpc)
         .list_agent_sessions(HostRpcHandler::list_agent_sessions_rpc)
         .create_agent_session(HostRpcHandler::create_agent_session_rpc)
+        .attach_agent_session(HostRpcHandler::attach_agent_session_rpc)
         .subscribe_agent_session(HostRpcHandler::subscribe_agent_session_rpc)
         .create_agent_turn(HostRpcHandler::create_agent_turn_rpc)
+        .list_agent_session_turns(HostRpcHandler::list_agent_session_turns_rpc)
+        .set_agent_session_config(HostRpcHandler::set_agent_session_config_rpc)
+        .update_agent_session(HostRpcHandler::update_agent_session_rpc)
         .remove_agent_project(HostRpcHandler::remove_agent_project_rpc);
 
     if process_resources_in_use.is_some() {
@@ -4439,10 +4444,78 @@ impl HostRpcHandler {
         }
     }
 
+    async fn attach_agent_session(
+        &mut self,
+        request: AttachAgentSessionReq,
+    ) -> Result<UnaryRpcOutcome> {
+        let proc_id = ProcId::AttachAgentSession.as_u64();
+        let config = match load_runtime_config(&self.config_path, &self.config_state).await {
+            Ok(config) => config,
+            Err(error) => {
+                return Ok(UnaryRpcOutcome::Message(agent_error_message(
+                    proc_id,
+                    AgentError {
+                        kind: AgentErrorKind::Failed,
+                        message: format!("load agent configuration: {error:#}"),
+                    },
+                )));
+            }
+        };
+        match self
+            .agents
+            .attach_session(&request.session_id, &config.agent_servers)
+            .await
+        {
+            Ok(session) => Ok(RpcResponse::AttachAgentSession(session).into()),
+            Err(error) => Ok(UnaryRpcOutcome::Message(agent_error_message(
+                proc_id, error,
+            ))),
+        }
+    }
+
     async fn create_agent_turn(&mut self, request: CreateAgentTurnReq) -> Result<UnaryRpcOutcome> {
         let proc_id = ProcId::CreateAgentTurn.as_u64();
         match self.agents.create_turn(request) {
             Ok(turn) => Ok(RpcResponse::CreateAgentTurn(turn).into()),
+            Err(error) => Ok(UnaryRpcOutcome::Message(agent_error_message(
+                proc_id, error,
+            ))),
+        }
+    }
+
+    async fn list_agent_session_turns(
+        &mut self,
+        request: ListAgentSessionTurnsReq,
+    ) -> Result<UnaryRpcOutcome> {
+        let proc_id = ProcId::ListAgentSessionTurns.as_u64();
+        match self.agents.list_session_turns(request) {
+            Ok(response) => Ok(RpcResponse::ListAgentSessionTurns(response).into()),
+            Err(error) => Ok(UnaryRpcOutcome::Message(agent_error_message(
+                proc_id, error,
+            ))),
+        }
+    }
+
+    async fn set_agent_session_config(
+        &mut self,
+        request: SetAgentSessionConfigReq,
+    ) -> Result<UnaryRpcOutcome> {
+        let proc_id = ProcId::SetAgentSessionConfig.as_u64();
+        match self.agents.set_session_config(request).await {
+            Ok(response) => Ok(RpcResponse::SetAgentSessionConfig(response).into()),
+            Err(error) => Ok(UnaryRpcOutcome::Message(agent_error_message(
+                proc_id, error,
+            ))),
+        }
+    }
+
+    async fn update_agent_session(
+        &mut self,
+        request: UpdateAgentSessionReq,
+    ) -> Result<UnaryRpcOutcome> {
+        let proc_id = ProcId::UpdateAgentSession.as_u64();
+        match self.agents.update_session(request) {
+            Ok(session) => Ok(RpcResponse::UpdateAgentSession(session).into()),
             Err(error) => Ok(UnaryRpcOutcome::Message(agent_error_message(
                 proc_id, error,
             ))),
@@ -4651,11 +4724,39 @@ impl HostRpcHandler {
         Box::pin(self.create_agent_session(request))
     }
 
+    fn attach_agent_session_rpc<'a>(
+        &'a mut self,
+        request: AttachAgentSessionReq,
+    ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
+        Box::pin(self.attach_agent_session(request))
+    }
+
     fn create_agent_turn_rpc<'a>(
         &'a mut self,
         request: CreateAgentTurnReq,
     ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
         Box::pin(self.create_agent_turn(request))
+    }
+
+    fn list_agent_session_turns_rpc<'a>(
+        &'a mut self,
+        request: ListAgentSessionTurnsReq,
+    ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
+        Box::pin(self.list_agent_session_turns(request))
+    }
+
+    fn set_agent_session_config_rpc<'a>(
+        &'a mut self,
+        request: SetAgentSessionConfigReq,
+    ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
+        Box::pin(self.set_agent_session_config(request))
+    }
+
+    fn update_agent_session_rpc<'a>(
+        &'a mut self,
+        request: UpdateAgentSessionReq,
+    ) -> RpcHandlerFuture<'a, Result<UnaryRpcOutcome>> {
+        Box::pin(self.update_agent_session(request))
     }
 
     fn remove_agent_project_rpc<'a>(

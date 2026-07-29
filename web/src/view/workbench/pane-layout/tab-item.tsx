@@ -5,6 +5,7 @@ import { useBunja } from "bunja/react";
 import {
   Activity,
   AppWindow,
+  Bot,
   Folder,
   Info,
   Terminal,
@@ -217,6 +218,9 @@ function WorkbenchTabIcon(
 ) {
   if (tab.tool === "daemon") {
     return <Info size={12} className={className} />;
+  }
+  if (tab.tool === "agent") {
+    return <Bot size={12} className={className} />;
   }
   if (tab.tool === "terminal") {
     return <Terminal size={12} className={className} />;

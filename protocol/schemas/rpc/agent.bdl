@@ -106,10 +106,14 @@ proc RespondAgentPermission = RespondAgentPermissionReq -> void throws AgentRpcE
 
 @ description
 | Changes one provider-defined session configuration option. The option id and
-| accepted value shape come from the current AgentConfigOption rows.
+| accepted value shape come from the current AgentConfigOption rows. The
+| response is the complete replacement set returned by the agent because one
+| change may alter the current value or availability of other options. seq
+| anchors the returned projection so clients can ignore a response older than
+| state already observed through SubscribeAgentSession.
 @ id - 56
 @ stream - unary
-proc SetAgentSessionConfig = SetAgentSessionConfigReq -> void throws AgentRpcError
+proc SetAgentSessionConfig = SetAgentSessionConfigReq -> SetAgentSessionConfigRes throws AgentRpcError
 
 @ description
 | Updates persisted session metadata. Omitted fields are unchanged. Title uses
@@ -121,7 +125,7 @@ proc UpdateAgentSession = UpdateAgentSessionReq -> AgentSessionInfo throws Agent
 
 @ description
 | Detaches and stops the agent runtime while retaining the session and its
-| workspace. A later turn may reattach a recoverable session.
+| workspace. AttachAgentSession may later reconnect a recoverable session.
 @ id - 58
 @ stream - unary
 proc CloseAgentSession = CloseAgentSessionReq -> void throws AgentRpcError
@@ -162,6 +166,16 @@ proc ListAgentSessionTurns = ListAgentSessionTurnsReq -> ListAgentSessionTurnsRe
 @ id - 62
 @ stream - server
 proc ReadAgentTerminalOutput = ReadAgentTerminalOutputReq -> AgentTerminalOutputEvent throws AgentRpcError
+
+@ description
+| Attaches an agent process to an existing persisted session. When a provider
+| session id is already stored, the daemon resumes it without replaying history
+| when supported and falls back to session/load for older agents. A session
+| that never finished its first attachment starts a new ACP session. Calling
+| this for an already attached session is idempotent.
+@ id - 63
+@ stream - unary
+proc AttachAgentSession = AttachAgentSessionReq -> AgentSessionInfo throws AgentRpcError
 
 struct CreateAgentProjectReq {
   @ id - 1
@@ -283,6 +297,11 @@ struct CreateAgentSessionReq {
   creationRequestId: string,
 }
 
+struct AttachAgentSessionReq {
+  @ id - 1
+  sessionId: string,
+}
+
 struct SubscribeAgentSessionReq {
   @ id - 1
   sessionId: string,
@@ -335,6 +354,14 @@ struct SetAgentSessionConfigReq {
 
   @ id - 3
   value: AgentConfigValue,
+}
+
+struct SetAgentSessionConfigRes {
+  @ id - 1
+  seq: u53,
+
+  @ id - 2
+  configOptions: AgentConfigOption[],
 }
 
 struct UpdateAgentSessionReq {
@@ -1603,6 +1630,10 @@ struct AgentUsage {
   contextWindowTokens?: u53,
 }
 
+@ description
+| One provider-defined session setting. Array order expresses the provider's
+| preferred display priority. category is only a UI placement hint; clients
+| must still render options with an absent or unknown category.
 struct AgentConfigOption {
   @ id - 1
   configId: string,
@@ -1615,6 +1646,29 @@ struct AgentConfigOption {
 
   @ id - 4
   input: AgentConfigInput,
+
+  @ id - 5
+  category?: AgentConfigOptionCategory,
+}
+
+union AgentConfigOptionCategory {
+  @ id - 1
+  Mode(),
+
+  @ id - 2
+  Model(),
+
+  @ id - 3
+  ModelConfig(),
+
+  @ id - 4
+  ThoughtLevel(),
+
+  @ id - 5
+  Other(
+    @ id - 1
+    name: string,
+  ),
 }
 
 union AgentConfigInput {
@@ -1652,6 +1706,17 @@ struct AgentConfigSelectOption {
 
   @ id - 3
   description?: string,
+
+  @ id - 4
+  group?: AgentConfigSelectGroup,
+}
+
+struct AgentConfigSelectGroup {
+  @ id - 1
+  groupId: string,
+
+  @ id - 2
+  title: string,
 }
 
 union AgentConfigValue {

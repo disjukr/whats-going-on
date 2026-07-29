@@ -1,6 +1,7 @@
 import {
   Activity,
   AppWindow,
+  Bot,
   CheckCircle2,
   CircuitBoard,
   Cpu,
@@ -25,6 +26,7 @@ import {
 import {
   type KeyboardEvent,
   type MouseEvent,
+  type ReactNode,
   type RefObject,
   useCallback,
   useRef,
@@ -35,6 +37,7 @@ import { type Machine, type MachineIconName } from "../../state/machines.ts";
 import type { DaemonInfoState } from "../../state/rpc-session.ts";
 import type { ConnectionState } from "../../state/types.ts";
 import type {
+  WorkbenchAgentTabConfig,
   WorkbenchFilesTabConfig,
   WorkbenchPane,
   WorkbenchTab,
@@ -219,6 +222,7 @@ const topbarTools: {
   tool: WorkbenchTool;
 }[] = [
   { icon: Radio, label: "Daemon", tool: "daemon" },
+  { icon: Bot, label: "Agent", tool: "agent" },
   { icon: Folder, label: "Files", tool: "files" },
   { icon: Terminal, label: "Terminal", tool: "terminal" },
   { icon: AppWindow, label: "Windows", tool: "windows" },
@@ -242,6 +246,7 @@ const machineIconOptions: {
 
 interface AppTopbarProps {
   activeTool: WorkbenchTool;
+  agentRail: ReactNode;
   connection?: ConnectionState;
   daemonInfo: DaemonInfoState;
   machine?: Machine;
@@ -251,6 +256,7 @@ interface AppTopbarProps {
   selectedMachineId?: string;
   terminalShells: AvailableShellInfo[];
   onAddMachine: () => void;
+  onOpenAgentTab: (config?: WorkbenchAgentTabConfig) => void;
   onOpenDaemonTab: () => void;
   onOpenFilesTab: (config?: WorkbenchFilesTabConfig) => void;
   onOpenProcessesTab: () => void;
@@ -281,6 +287,7 @@ interface MachineMenuState {
 export function AppTopbar(
   {
     activeTool,
+    agentRail,
     connection,
     daemonInfo,
     machine,
@@ -290,6 +297,7 @@ export function AppTopbar(
     selectedMachineId,
     terminalShells,
     onAddMachine,
+    onOpenAgentTab,
     onOpenDaemonTab,
     onOpenFilesTab,
     onOpenProcessesTab,
@@ -314,6 +322,7 @@ export function AppTopbar(
   const defaultTerminalShell =
     terminalShells.find((shell) => shell.isDefault) ?? terminalShells[0];
   const openToolTab: Record<WorkbenchTool, () => void> = {
+    agent: onOpenAgentTab,
     daemon: onOpenDaemonTab,
     files: onOpenFilesTab,
     processes: onOpenProcessesTab,
@@ -925,6 +934,7 @@ export function AppTopbar(
             {renderToolLaunchers()}
           </nav>
         </div>
+        {agentRail}
       </header>
       {renderToolMenu()}
       {renderConnectionPopover()}
@@ -1039,6 +1049,7 @@ function ToolIcon(
   { size, tool }: { size: number; tool: WorkbenchTool },
 ) {
   if (tool === "terminal") return <Terminal size={size} />;
+  if (tool === "agent") return <Bot size={size} />;
   if (tool === "windows") return <AppWindow size={size} />;
   if (tool === "processes") return <Activity size={size} />;
   if (tool === "files") return <Folder size={size} />;

@@ -7,6 +7,7 @@ import { terminalShellsBunja } from "../../state/terminal-shells.ts";
 import { workbenchBunja } from "../../state/workbench.ts";
 import { machinePanelBunja } from "../machine-panel/state.ts";
 import { layoutBunja } from "../state.tsx";
+import { AgentRail } from "./agent-rail.tsx";
 import { AppTopbar } from "./app-topbar.tsx";
 
 export function TopBarRegion() {
@@ -56,6 +57,7 @@ export function TopBarRegion() {
     <AppTopbar
       connection={connection}
       daemonInfo={daemonInfo}
+      agentRail={<AgentRail />}
       activeTool={activeTool}
       machine={selected}
       machinePanelCollapsed={machinePanelCollapsed}
@@ -64,6 +66,7 @@ export function TopBarRegion() {
       selectedMachineId={selectedId}
       terminalShells={terminalShells}
       onAddMachine={addMachine}
+      onOpenAgentTab={workbench.openAgentTab}
       onOpenDaemonTab={workbench.openDaemonTab}
       onOpenFilesTab={workbench.openFilesTab}
       onOpenProcessesTab={workbench.openProcessesTab}

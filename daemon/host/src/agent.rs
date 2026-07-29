@@ -3,37 +3,50 @@ use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock as AcpContentBlock, StopReason as AcpStopReason, TextContent as AcpTextContent,
+    ContentBlock as AcpContentBlock, SessionConfigKind as AcpSessionConfigKind,
+    SessionConfigOption as AcpSessionConfigOption,
+    SessionConfigOptionCategory as AcpSessionConfigOptionCategory,
+    SessionConfigOptionValue as AcpSessionConfigOptionValue,
+    SessionConfigSelectOptions as AcpSessionConfigSelectOptions, StopReason as AcpStopReason,
+    TextContent as AcpTextContent,
 };
 use anyhow::Result;
 use rieul_daemon_core::config::{AgentServerConfig, SystemConfig};
 use rieul_daemon_core::generated::rpc::{
-    AgentAttachmentState, AgentContent, AgentFailure, AgentMessage, AgentMessageRole,
-    AgentMessageState, AgentProjectAvailability, AgentProjectInfo, AgentProjectsTableEvent,
-    AgentProviderAuthentication, AgentProviderAvailability, AgentProviderCapabilities,
-    AgentProviderInfo, AgentProvidersTableEvent, AgentSessionArchiveFilter, AgentSessionEvent,
-    AgentSessionInfo, AgentSessionLiveSnapshot, AgentSessionRecoverability, AgentSessionSummary,
+    AgentAttachmentState, AgentConfigInput, AgentConfigOption, AgentConfigOptionCategory,
+    AgentConfigSelectGroup, AgentConfigSelectOption, AgentConfigValue, AgentContent, AgentFailure,
+    AgentMessage, AgentMessageRole, AgentMessageState, AgentProjectAvailability, AgentProjectInfo,
+    AgentProjectsTableEvent, AgentProviderAuthentication, AgentProviderAvailability,
+    AgentProviderCapabilities, AgentProviderInfo, AgentProvidersTableEvent,
+    AgentSessionArchiveFilter, AgentSessionEvent, AgentSessionInfo, AgentSessionLiveSnapshot,
+    AgentSessionRecoverability, AgentSessionSummary, AgentSessionTitleUpdate,
     AgentSessionTurnState, AgentSessionWorkspaceFilter, AgentStopReason, AgentTaskWorkspaceSource,
     AgentTaskWorkspaceState, AgentTurnInfo, AgentTurnRecord, AgentTurnState, AgentUsage,
     AgentWorkspaceBinding, CreateAgentProjectReq, CreateAgentSessionReq, CreateAgentTurnReq,
-    CreateAgentWorkspace, ListAgentSessionsReq, ListAgentSessionsRes,
+    CreateAgentWorkspace, ListAgentSessionTurnsReq, ListAgentSessionTurnsRes, ListAgentSessionsReq,
+    ListAgentSessionsRes, SetAgentSessionConfigReq, SetAgentSessionConfigRes,
+    UpdateAgentSessionReq,
 };
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::agent_runtime::{
     start_agent_runtime, AgentRuntimeConfig, AgentRuntimeEvent, AgentRuntimeHandle,
+    AgentRuntimeSession,
 };
 use crate::state_db::{
     DaemonStateDb, NewAgentSession, NewAgentTaskWorkspace, StoredAgentArchiveFilter,
-    StoredAgentProject, StoredAgentSession, StoredAgentSessionQuery, StoredAgentTurn,
-    StoredAgentWorkspaceFilter,
+    StoredAgentConfigValue, StoredAgentMessage, StoredAgentMessageContent, StoredAgentProject,
+    StoredAgentSession, StoredAgentSessionQuery, StoredAgentTurn, StoredAgentTurnRecord,
+    StoredAgentWorkspaceFilter, UpdatedAgentSession,
 };
 
 const MAX_SESSION_PAGE_SIZE: usize = 100;
+const MAX_SESSION_HISTORY_PAGE_SIZE: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentErrorKind {
@@ -87,6 +100,7 @@ pub struct AgentManager {
     project_events: watch::Sender<u64>,
     catalog_events: watch::Sender<u64>,
     runtimes: Arc<StdMutex<HashMap<String, AgentRuntimeEntry>>>,
+    attachment_locks: Arc<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 #[derive(Clone)]
@@ -97,7 +111,31 @@ struct AgentRuntimeEntry {
 
 struct AgentLiveSession {
     snapshot: StdMutex<AgentSessionLiveSnapshot>,
+    state_update: StdMutex<()>,
+    config_changing: AtomicBool,
     events: broadcast::Sender<AgentSessionEvent>,
+}
+
+struct AgentConfigChangeGuard<'a>(&'a AtomicBool);
+
+impl<'a> AgentConfigChangeGuard<'a> {
+    fn begin(changing: &'a AtomicBool) -> Result<Self, AgentError> {
+        changing
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| {
+                AgentError::new(
+                    AgentErrorKind::Conflict,
+                    "agent session configuration is already changing",
+                )
+            })?;
+        Ok(Self(changing))
+    }
+}
+
+impl Drop for AgentConfigChangeGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 pub struct AgentSessionSubscription {
@@ -116,6 +154,7 @@ impl AgentManager {
             project_events,
             catalog_events,
             runtimes: Arc::new(StdMutex::new(HashMap::new())),
+            attachment_locks: Arc::new(StdMutex::new(HashMap::new())),
         })
     }
 
@@ -317,6 +356,8 @@ impl AgentManager {
         let provider_id = request.provider_id.clone();
         let persisted = self.create_session(request, &HashSet::from([provider_id]))?;
         let session_id = persisted.summary.session_id.clone();
+        let attachment_lock = self.attachment_lock(&session_id)?;
+        let _attaching = attachment_lock.lock().await;
         if let Some(runtime) = self.runtime(&session_id)? {
             return runtime
                 .live
@@ -325,12 +366,49 @@ impl AgentManager {
                 .map(|snapshot| snapshot.session.clone())
                 .map_err(|_| AgentError::failed("agent live state lock was poisoned"));
         }
-        if persisted.provider_session_id.is_some() {
-            return Err(AgentError::unavailable(
-                "reattaching persisted ACP sessions is not implemented yet",
-            ));
-        }
+        self.attach_persisted_session(persisted, provider).await
+    }
 
+    pub async fn attach_session(
+        &self,
+        session_id: &str,
+        providers: &BTreeMap<String, AgentServerConfig>,
+    ) -> Result<AgentSessionInfo, AgentError> {
+        if session_id.is_empty() {
+            return Err(AgentError::invalid_argument("sessionId must not be empty"));
+        }
+        let attachment_lock = self.attachment_lock(session_id)?;
+        let _attaching = attachment_lock.lock().await;
+        if let Some(runtime) = self.runtime(session_id)? {
+            return runtime
+                .live
+                .snapshot
+                .lock()
+                .map(|snapshot| snapshot.session.clone())
+                .map_err(|_| AgentError::failed("agent live state lock was poisoned"));
+        }
+        let persisted = self
+            .with_db(|db| db.find_agent_session_by_id(session_id))?
+            .ok_or_else(|| AgentError::not_found("agent session was not found"))?;
+        let provider = providers
+            .get(&persisted.provider_id)
+            .cloned()
+            .ok_or_else(|| {
+                AgentError::unavailable(format!(
+                    "agent provider '{}' is not configured",
+                    persisted.provider_id
+                ))
+            })?;
+        self.attach_persisted_session(session_info(persisted), provider)
+            .await
+    }
+
+    async fn attach_persisted_session(
+        &self,
+        persisted: AgentSessionInfo,
+        provider: AgentServerConfig,
+    ) -> Result<AgentSessionInfo, AgentError> {
+        let session_id = persisted.summary.session_id.clone();
         let persisted_seq = self
             .with_db(|db| db.find_agent_session_by_id(&session_id))?
             .map(|session| session.latest_seq)
@@ -346,6 +424,8 @@ impl AgentManager {
                 config_options: Vec::new(),
                 latest_seq: persisted_seq,
             }),
+            state_update: StdMutex::new(()),
+            config_changing: AtomicBool::new(false),
             events: event_tx,
         });
         let (runtime_events, runtime_receiver) = mpsc::unbounded_channel();
@@ -355,6 +435,12 @@ impl AgentManager {
                 args: provider.args,
                 env: provider.env,
                 cwd: PathBuf::from(&persisted.summary.cwd),
+                session: match persisted.provider_session_id.clone() {
+                    Some(provider_session_id) => AgentRuntimeSession::Existing {
+                        provider_session_id,
+                    },
+                    None => AgentRuntimeSession::New,
+                },
             },
             runtime_events,
         )
@@ -376,23 +462,33 @@ impl AgentManager {
             }
         };
         let attached_at_ms = current_unix_ms();
-        self.with_db(|db| {
-            db.set_agent_provider_session_id(
-                &session_id,
-                &ready.provider_session_id,
-                attached_at_ms,
-            )
+        let config_options = normalize_acp_config_options(ready.config_options);
+        let config_values = stored_config_values(&config_options);
+        if persisted.provider_session_id.is_none() {
+            self.with_db(|db| {
+                db.set_agent_provider_session_id(
+                    &session_id,
+                    &ready.provider_session_id,
+                    attached_at_ms,
+                )
+            })?;
+        }
+        self.with_db_mut(|db| {
+            db.replace_agent_session_config_values(&session_id, &config_values, attached_at_ms)
         })?;
         if let Ok(mut snapshot) = live.snapshot.lock() {
             snapshot.session.provider_session_id = Some(ready.provider_session_id);
             snapshot.session.attached_at_ms = Some(attached_at_ms);
             snapshot.session.summary.attachment = AgentAttachmentState::Attached;
-            snapshot.session.summary.recoverability = if ready.load_session {
+            snapshot.session.summary.recoverability = if ready.resume_session {
+                AgentSessionRecoverability::Resumable
+            } else if ready.load_session {
                 AgentSessionRecoverability::Loadable
             } else {
                 AgentSessionRecoverability::ProcessLocal
             };
             snapshot.session.summary.updated_at_ms = attached_at_ms;
+            snapshot.config_options = config_options;
         }
         self.runtimes
             .lock()
@@ -452,6 +548,54 @@ impl AgentManager {
         })
     }
 
+    pub async fn set_session_config(
+        &self,
+        request: SetAgentSessionConfigReq,
+    ) -> Result<SetAgentSessionConfigRes, AgentError> {
+        if request.config_id.is_empty() {
+            return Err(AgentError::invalid_argument("configId must not be empty"));
+        }
+        let runtime = self
+            .runtime(&request.session_id)?
+            .ok_or_else(|| AgentError::unavailable("agent session is not attached"))?;
+        let _changing = AgentConfigChangeGuard::begin(&runtime.live.config_changing)?;
+        let acp_value = {
+            let _update = runtime
+                .live
+                .state_update
+                .lock()
+                .map_err(|_| AgentError::failed("agent state update lock was poisoned"))?;
+            let snapshot = runtime
+                .live
+                .snapshot
+                .lock()
+                .map_err(|_| AgentError::failed("agent live state lock was poisoned"))?;
+            if snapshot.session.summary.attachment != AgentAttachmentState::Attached {
+                return Err(AgentError::unavailable("agent session is not attached"));
+            }
+            if snapshot.active_turn.is_some() {
+                return Err(AgentError::new(
+                    AgentErrorKind::Conflict,
+                    "session configuration cannot be changed during an active turn",
+                ));
+            }
+            let option = snapshot
+                .config_options
+                .iter()
+                .find(|option| option.config_id == request.config_id)
+                .ok_or_else(|| AgentError::invalid_argument("configId is not currently offered"))?;
+            validate_agent_config_value(option, request.value)?
+        };
+        let options = runtime
+            .handle
+            .set_config(request.config_id, acp_value)
+            .await
+            .map_err(|message| {
+                AgentError::unavailable(format!("set ACP session configuration: {message}"))
+            })?;
+        self.apply_agent_config_options(&request.session_id, options, &runtime.live)
+    }
+
     pub fn create_turn(&self, request: CreateAgentTurnReq) -> Result<AgentTurnInfo, AgentError> {
         if request.client_request_id.is_empty() {
             return Err(AgentError::invalid_argument(
@@ -482,6 +626,17 @@ impl AgentManager {
         let runtime = self
             .runtime(&request.session_id)?
             .ok_or_else(|| AgentError::unavailable("agent session is not attached"))?;
+        let state_update = runtime
+            .live
+            .state_update
+            .lock()
+            .map_err(|_| AgentError::failed("agent state update lock was poisoned"))?;
+        if runtime.live.config_changing.load(Ordering::SeqCst) {
+            return Err(AgentError::new(
+                AgentErrorKind::Conflict,
+                "agent session configuration is changing",
+            ));
+        }
         {
             let snapshot = runtime
                 .live
@@ -582,6 +737,7 @@ impl AgentManager {
             message: assistant_message,
         });
         let _ = self.catalog_events.send(created.catalog_revision);
+        drop(state_update);
         if let Err(message) = runtime.handle.prompt(
             turn_id.clone(),
             vec![AcpContentBlock::Text(AcpTextContent::new(text))],
@@ -660,6 +816,138 @@ impl AgentManager {
         })
     }
 
+    pub fn update_session(
+        &self,
+        request: UpdateAgentSessionReq,
+    ) -> Result<AgentSessionInfo, AgentError> {
+        if request.session_id.is_empty() {
+            return Err(AgentError::invalid_argument("sessionId must not be empty"));
+        }
+        let title = match request.title {
+            Some(AgentSessionTitleUpdate::Set { value }) => {
+                let value = value.trim();
+                if value.is_empty() {
+                    return Err(AgentError::invalid_argument(
+                        "title must not be empty; use Clear instead",
+                    ));
+                }
+                Some(Some(value.to_string()))
+            }
+            Some(AgentSessionTitleUpdate::Clear) => Some(None),
+            None => None,
+        };
+        if title.is_none() && request.archived.is_none() {
+            return Err(AgentError::invalid_argument(
+                "at least one session field must be updated",
+            ));
+        }
+        if self
+            .with_db(|db| db.find_agent_session_by_id(&request.session_id))?
+            .is_none()
+        {
+            return Err(AgentError::not_found("agent session was not found"));
+        }
+
+        let runtime = self.runtime(&request.session_id)?;
+        let update = || {
+            self.with_db_mut(|db| {
+                db.update_agent_session(
+                    &request.session_id,
+                    title.as_ref().map(|title| title.as_deref()),
+                    request.archived,
+                    current_unix_ms(),
+                )
+            })
+        };
+        let UpdatedAgentSession {
+            session,
+            seq,
+            catalog_revision,
+        } = if let Some(runtime) = runtime.as_ref() {
+            let _state_update = runtime
+                .live
+                .state_update
+                .lock()
+                .map_err(|_| AgentError::failed("agent state update lock was poisoned"))?;
+            update()?
+        } else {
+            update()?
+        };
+
+        let response = if let Some(runtime) = runtime {
+            let mut snapshot = runtime
+                .live
+                .snapshot
+                .lock()
+                .map_err(|_| AgentError::failed("agent live state lock was poisoned"))?;
+            snapshot.latest_seq = seq;
+            snapshot.session.summary.title = session.title;
+            snapshot.session.summary.archived = session.archived;
+            snapshot.session.summary.updated_at_ms = session.updated_at_ms;
+            let response = snapshot.session.clone();
+            drop(snapshot);
+            let _ = runtime.live.events.send(AgentSessionEvent::SessionUpsert {
+                seq,
+                session: response.clone(),
+            });
+            response
+        } else {
+            session_info(session)
+        };
+        let _ = self.catalog_events.send(catalog_revision);
+        Ok(response)
+    }
+
+    pub fn list_session_turns(
+        &self,
+        request: ListAgentSessionTurnsReq,
+    ) -> Result<ListAgentSessionTurnsRes, AgentError> {
+        if request.session_id.is_empty() {
+            return Err(AgentError::invalid_argument("sessionId must not be empty"));
+        }
+        let limit = usize::try_from(request.limit)
+            .ok()
+            .filter(|limit| (1..=MAX_SESSION_HISTORY_PAGE_SIZE).contains(limit))
+            .ok_or_else(|| {
+                AgentError::invalid_argument(format!(
+                    "limit must be between 1 and {MAX_SESSION_HISTORY_PAGE_SIZE}"
+                ))
+            })?;
+        let session = self
+            .with_db(|db| db.find_agent_session_by_id(&request.session_id))?
+            .ok_or_else(|| AgentError::not_found("agent session was not found"))?;
+        if request.through_seq > session.latest_seq {
+            return Err(AgentError::invalid_argument(
+                "throughSeq is newer than the persisted session state",
+            ));
+        }
+        let fingerprint = history_cursor_fingerprint(&request.session_id, request.through_seq);
+        let cursor = request
+            .cursor
+            .as_deref()
+            .map(|cursor| decode_session_cursor(cursor, fingerprint))
+            .transpose()?;
+        let mut rows = self.with_db(|db| {
+            db.list_completed_agent_turns(
+                &request.session_id,
+                request.through_seq,
+                cursor,
+                limit + 1,
+            )
+        })?;
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        let next_cursor = has_more.then(|| {
+            let last = rows.last().expect("non-empty paginated agent turn history");
+            encode_session_cursor(fingerprint, last.completed_seq, &last.turn.turn_id)
+        });
+        rows.reverse();
+        Ok(ListAgentSessionTurnsRes {
+            turns: rows.into_iter().map(stored_turn_record).collect(),
+            next_cursor,
+        })
+    }
+
     async fn consume_runtime_events(
         &self,
         session_id: String,
@@ -674,6 +962,9 @@ impl AgentManager {
                 AgentRuntimeEvent::Usage { used, size } => {
                     self.apply_agent_usage(&session_id, used, size, &live)
                 }
+                AgentRuntimeEvent::ConfigOptions { options } => self
+                    .apply_agent_config_options(&session_id, options, &live)
+                    .map(|_| ()),
                 AgentRuntimeEvent::PromptFinished {
                     turn_id,
                     stop_reason,
@@ -715,13 +1006,62 @@ impl AgentManager {
                             &live,
                         );
                     }
-                    self.apply_runtime_exit(&session_id, message, &live)
+                    let result = self.apply_runtime_exit(&session_id, message, &live);
+                    self.remove_runtime(&session_id, &live);
+                    result
                 }
             };
             if result.is_err() {
                 break;
             }
         }
+    }
+
+    fn apply_agent_config_options(
+        &self,
+        session_id: &str,
+        acp_options: Vec<AcpSessionConfigOption>,
+        live: &AgentLiveSession,
+    ) -> Result<SetAgentSessionConfigRes, AgentError> {
+        let _update = live
+            .state_update
+            .lock()
+            .map_err(|_| AgentError::failed("agent state update lock was poisoned"))?;
+        let options = normalize_acp_config_options(acp_options);
+        {
+            let snapshot = live
+                .snapshot
+                .lock()
+                .map_err(|_| AgentError::failed("agent live state lock was poisoned"))?;
+            if snapshot.config_options == options {
+                return Ok(SetAgentSessionConfigRes {
+                    seq: snapshot.latest_seq,
+                    config_options: options,
+                });
+            }
+        }
+        let now = current_unix_ms();
+        let values = stored_config_values(&options);
+        let seq = self.with_db_mut(|db| {
+            db.replace_agent_session_config_values_and_advance(session_id, &values, now)
+        })?;
+        {
+            let mut snapshot = live
+                .snapshot
+                .lock()
+                .map_err(|_| AgentError::failed("agent live state lock was poisoned"))?;
+            snapshot.latest_seq = seq;
+            snapshot.config_options = options.clone();
+            snapshot.session.summary.updated_at_ms = now;
+        }
+        let _ = live.events.send(AgentSessionEvent::ConfigOptionsReplace {
+            seq,
+            options: options.clone(),
+        });
+        Ok(SetAgentSessionConfigRes {
+            seq,
+            config_options: options,
+        })
     }
 
     fn apply_agent_text_chunk(
@@ -731,6 +1071,10 @@ impl AgentManager {
         text: &str,
         live: &AgentLiveSession,
     ) -> Result<(), AgentError> {
+        let _update = live
+            .state_update
+            .lock()
+            .map_err(|_| AgentError::failed("agent state update lock was poisoned"))?;
         let message_id = {
             let snapshot = live
                 .snapshot
@@ -773,6 +1117,10 @@ impl AgentManager {
         size: u64,
         live: &AgentLiveSession,
     ) -> Result<(), AgentError> {
+        let _update = live
+            .state_update
+            .lock()
+            .map_err(|_| AgentError::failed("agent state update lock was poisoned"))?;
         let now = current_unix_ms();
         let seq = self.with_db_mut(|db| db.advance_agent_session_sequence(session_id, now))?;
         let usage = AgentUsage {
@@ -802,6 +1150,10 @@ impl AgentManager {
         outcome: Result<AgentStopReason, AgentFailure>,
         live: &AgentLiveSession,
     ) -> Result<(), AgentError> {
+        let _update = live
+            .state_update
+            .lock()
+            .map_err(|_| AgentError::failed("agent state update lock was poisoned"))?;
         let (message_id, preview) = {
             let snapshot = live
                 .snapshot
@@ -889,6 +1241,10 @@ impl AgentManager {
         message: Option<String>,
         live: &AgentLiveSession,
     ) -> Result<(), AgentError> {
+        let _update = live
+            .state_update
+            .lock()
+            .map_err(|_| AgentError::failed("agent state update lock was poisoned"))?;
         let now = current_unix_ms();
         let seq = self.with_db_mut(|db| db.advance_agent_session_sequence(session_id, now))?;
         let session = {
@@ -924,6 +1280,28 @@ impl AgentManager {
             .map(|runtimes| runtimes.get(session_id).cloned())
     }
 
+    fn attachment_lock(&self, session_id: &str) -> Result<Arc<tokio::sync::Mutex<()>>, AgentError> {
+        let mut locks = self
+            .attachment_locks
+            .lock()
+            .map_err(|_| AgentError::failed("agent attachment locks were poisoned"))?;
+        Ok(locks
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone())
+    }
+
+    fn remove_runtime(&self, session_id: &str, live: &Arc<AgentLiveSession>) {
+        if let Ok(mut runtimes) = self.runtimes.lock() {
+            let should_remove = runtimes
+                .get(session_id)
+                .is_some_and(|runtime| Arc::ptr_eq(&runtime.live, live));
+            if should_remove {
+                runtimes.remove(session_id);
+            }
+        }
+    }
+
     fn with_db<T>(
         &self,
         operation: impl FnOnce(&DaemonStateDb) -> Result<T>,
@@ -945,6 +1323,123 @@ impl AgentManager {
             .map_err(|_| AgentError::failed("agent database lock was poisoned"))?;
         operation(&mut db).map_err(|error| AgentError::failed(format!("agent database: {error:#}")))
     }
+}
+
+fn normalize_acp_config_options(options: Vec<AcpSessionConfigOption>) -> Vec<AgentConfigOption> {
+    options
+        .into_iter()
+        .filter_map(normalize_acp_config_option)
+        .collect()
+}
+
+fn normalize_acp_config_option(option: AcpSessionConfigOption) -> Option<AgentConfigOption> {
+    let input = match option.kind {
+        AcpSessionConfigKind::Select(select) => {
+            let mut options = Vec::new();
+            match select.options {
+                AcpSessionConfigSelectOptions::Ungrouped(values) => {
+                    options.extend(values.into_iter().map(|value| AgentConfigSelectOption {
+                        value: value.value.to_string(),
+                        title: value.name,
+                        description: value.description,
+                        group: None,
+                    }));
+                }
+                AcpSessionConfigSelectOptions::Grouped(groups) => {
+                    for group in groups {
+                        let normalized_group = AgentConfigSelectGroup {
+                            group_id: group.group.to_string(),
+                            title: group.name,
+                        };
+                        options.extend(group.options.into_iter().map(|value| {
+                            AgentConfigSelectOption {
+                                value: value.value.to_string(),
+                                title: value.name,
+                                description: value.description,
+                                group: Some(normalized_group.clone()),
+                            }
+                        }));
+                    }
+                }
+                _ => return None,
+            }
+            AgentConfigInput::Select {
+                current_value: select.current_value.to_string(),
+                options,
+            }
+        }
+        AcpSessionConfigKind::Boolean(value) => AgentConfigInput::Boolean {
+            current_value: value.current_value,
+        },
+        _ => return None,
+    };
+    Some(AgentConfigOption {
+        config_id: option.id.to_string(),
+        title: option.name,
+        description: option.description,
+        input,
+        category: option.category.map(|category| match category {
+            AcpSessionConfigOptionCategory::Mode => AgentConfigOptionCategory::Mode,
+            AcpSessionConfigOptionCategory::Model => AgentConfigOptionCategory::Model,
+            AcpSessionConfigOptionCategory::ModelConfig => AgentConfigOptionCategory::ModelConfig,
+            AcpSessionConfigOptionCategory::ThoughtLevel => AgentConfigOptionCategory::ThoughtLevel,
+            AcpSessionConfigOptionCategory::Other(name) => {
+                AgentConfigOptionCategory::Other { name }
+            }
+            _ => AgentConfigOptionCategory::Other {
+                name: "unknown".to_string(),
+            },
+        }),
+    })
+}
+
+fn validate_agent_config_value(
+    option: &AgentConfigOption,
+    value: AgentConfigValue,
+) -> Result<AcpSessionConfigOptionValue, AgentError> {
+    match (&option.input, value) {
+        (AgentConfigInput::Select { options, .. }, AgentConfigValue::String { value }) => {
+            if !options.iter().any(|option| option.value == value) {
+                return Err(AgentError::invalid_argument(
+                    "the selected value is not currently offered",
+                ));
+            }
+            Ok(AcpSessionConfigOptionValue::value_id(value))
+        }
+        (AgentConfigInput::Boolean { .. }, AgentConfigValue::Boolean { value }) => {
+            Ok(AcpSessionConfigOptionValue::boolean(value))
+        }
+        (AgentConfigInput::Text { .. }, AgentConfigValue::String { .. }) => Err(
+            AgentError::invalid_argument("text session configuration is not supported by ACP"),
+        ),
+        _ => Err(AgentError::invalid_argument(
+            "the configuration value type does not match the current option",
+        )),
+    }
+}
+
+fn stored_config_values(options: &[AgentConfigOption]) -> Vec<StoredAgentConfigValue> {
+    options
+        .iter()
+        .filter_map(|option| match &option.input {
+            AgentConfigInput::Select { current_value, .. }
+            | AgentConfigInput::Text {
+                current_value: Some(current_value),
+                ..
+            } => Some(StoredAgentConfigValue::String {
+                config_id: option.config_id.clone(),
+                value: current_value.clone(),
+            }),
+            AgentConfigInput::Boolean { current_value } => Some(StoredAgentConfigValue::Boolean {
+                config_id: option.config_id.clone(),
+                value: *current_value,
+            }),
+            AgentConfigInput::Text {
+                current_value: None,
+                ..
+            } => None,
+        })
+        .collect()
 }
 
 fn active_assistant_message<'a>(
@@ -1058,6 +1553,70 @@ fn stored_turn_info(turn: StoredAgentTurn) -> AgentTurnInfo {
         started_at_ms: turn.started_at_ms,
         finished_at_ms: turn.finished_at_ms,
         context: None,
+    }
+}
+
+fn stored_turn_record(record: StoredAgentTurnRecord) -> AgentTurnRecord {
+    AgentTurnRecord {
+        turn: stored_turn_info(record.turn),
+        messages: record.messages.into_iter().map(stored_message).collect(),
+        tool_calls: Vec::new(),
+        permissions: Vec::new(),
+        plan: None,
+        terminals: Vec::new(),
+    }
+}
+
+fn stored_message(message: StoredAgentMessage) -> AgentMessage {
+    let role = match message.role_kind.as_str() {
+        "user" => AgentMessageRole::User,
+        "assistant" => AgentMessageRole::Assistant,
+        "thought" => AgentMessageRole::Thought,
+        "system" => AgentMessageRole::System,
+        _ => AgentMessageRole::Other {
+            name: message
+                .role_other
+                .unwrap_or_else(|| message.role_kind.clone()),
+        },
+    };
+    AgentMessage {
+        message_id: message.message_id,
+        turn_id: message.turn_id,
+        role,
+        content: message
+            .content
+            .into_iter()
+            .map(|content| match content {
+                StoredAgentMessageContent::Text { text } => AgentContent::Text { text },
+                StoredAgentMessageContent::Image { mime_type, data } => {
+                    AgentContent::Image { mime_type, data }
+                }
+                StoredAgentMessageContent::ResourceLink {
+                    uri,
+                    name,
+                    mime_type,
+                } => AgentContent::ResourceLink {
+                    uri,
+                    name,
+                    mime_type,
+                },
+                StoredAgentMessageContent::EmbeddedText {
+                    uri,
+                    mime_type,
+                    text,
+                } => AgentContent::EmbeddedText {
+                    uri,
+                    mime_type,
+                    text,
+                },
+            })
+            .collect(),
+        state: if message.state_kind == "streaming" {
+            AgentMessageState::Streaming
+        } else {
+            AgentMessageState::Complete
+        },
+        created_at_ms: message.created_at_ms,
     }
 }
 
@@ -1351,6 +1910,14 @@ fn session_filter_fingerprint(
     hasher.finish()
 }
 
+fn history_cursor_fingerprint(session_id: &str, through_seq: u64) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "agent-session-history".hash(&mut hasher);
+    session_id.hash(&mut hasher);
+    through_seq.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn encode_session_cursor(fingerprint: u64, updated_at_ms: u64, session_id: &str) -> String {
     format!("{fingerprint:016x}:{updated_at_ms}:{session_id}")
 }
@@ -1379,6 +1946,7 @@ fn decode_session_cursor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::v1::{SessionConfigSelectGroup, SessionConfigSelectOption};
     use rieul_daemon_core::generated::rpc::{
         AgentSessionArchiveFilter, AgentSessionWorkspaceFilter,
     };
@@ -1389,6 +1957,49 @@ mod tests {
             root.join("tasks"),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn normalizes_grouped_thought_level_config() {
+        let option = AcpSessionConfigOption::select(
+            "reasoning_effort",
+            "Reasoning effort",
+            "medium",
+            vec![SessionConfigSelectGroup::new(
+                "effort",
+                "Effort",
+                vec![
+                    SessionConfigSelectOption::new("low", "Low"),
+                    SessionConfigSelectOption::new("medium", "Medium"),
+                    SessionConfigSelectOption::new("high", "High"),
+                ],
+            )],
+        )
+        .category(AcpSessionConfigOptionCategory::ThoughtLevel);
+
+        let normalized = normalize_acp_config_options(vec![option]);
+
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(
+            normalized[0].category,
+            Some(AgentConfigOptionCategory::ThoughtLevel)
+        );
+        let AgentConfigInput::Select {
+            current_value,
+            options,
+        } = &normalized[0].input
+        else {
+            panic!("expected select config");
+        };
+        assert_eq!(current_value, "medium");
+        assert_eq!(options.len(), 3);
+        assert_eq!(
+            options[0].group,
+            Some(AgentConfigSelectGroup {
+                group_id: "effort".to_string(),
+                title: "Effort".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -1451,6 +2062,67 @@ mod tests {
     }
 
     #[test]
+    fn updates_and_archives_persisted_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager(dir.path());
+        let session = manager
+            .create_session(
+                CreateAgentSessionReq {
+                    provider_id: "test".to_string(),
+                    workspace: CreateAgentWorkspace::Task {
+                        source: AgentTaskWorkspaceSource::Empty,
+                    },
+                    title: Some("Session".to_string()),
+                    creation_request_id: "archive-request".to_string(),
+                },
+                &HashSet::from(["test".to_string()]),
+            )
+            .unwrap();
+
+        let updated = manager
+            .update_session(UpdateAgentSessionReq {
+                session_id: session.summary.session_id.clone(),
+                title: Some(AgentSessionTitleUpdate::Set {
+                    value: "Renamed".to_string(),
+                }),
+                archived: Some(true),
+            })
+            .unwrap();
+
+        assert_eq!(updated.summary.title.as_deref(), Some("Renamed"));
+        assert!(updated.summary.archived);
+        let active = manager
+            .list_sessions(ListAgentSessionsReq {
+                workspace: AgentSessionWorkspaceFilter::Any,
+                archived: AgentSessionArchiveFilter::ActiveOnly,
+                query: None,
+                cursor: None,
+                limit: 20,
+            })
+            .unwrap();
+        assert!(active.rows.is_empty());
+        let archived = manager
+            .list_sessions(ListAgentSessionsReq {
+                workspace: AgentSessionWorkspaceFilter::Any,
+                archived: AgentSessionArchiveFilter::ArchivedOnly,
+                query: None,
+                cursor: None,
+                limit: 20,
+            })
+            .unwrap();
+        assert_eq!(archived.rows, vec![updated.summary]);
+        assert_eq!(archived.catalog_revision, 2);
+        assert_eq!(
+            manager
+                .subscribe_session(&session.summary.session_id)
+                .unwrap()
+                .snapshot
+                .latest_seq,
+            1
+        );
+    }
+
+    #[test]
     fn creates_empty_task_workspace() {
         let dir = tempfile::tempdir().unwrap();
         let manager = manager(dir.path());
@@ -1473,6 +2145,89 @@ mod tests {
             session.summary.workspace,
             AgentWorkspaceBinding::Task { .. }
         ));
+    }
+
+    #[test]
+    fn pages_completed_session_turn_history_from_snapshot_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager(dir.path());
+        let session = manager
+            .create_session(
+                CreateAgentSessionReq {
+                    provider_id: "test".to_string(),
+                    workspace: CreateAgentWorkspace::Task {
+                        source: AgentTaskWorkspaceSource::Empty,
+                    },
+                    title: None,
+                    creation_request_id: "history-session-request".to_string(),
+                },
+                &HashSet::from(["test".to_string()]),
+            )
+            .unwrap();
+        let session_id = session.summary.session_id;
+        manager
+            .with_db_mut(|db| {
+                for (index, reply) in [(1, "first reply"), (2, "second reply")] {
+                    let turn_id = format!("turn-{index}");
+                    let assistant_message_id = format!("assistant-{index}");
+                    db.create_agent_text_turn(
+                        &session_id,
+                        &format!("request-{index}"),
+                        &turn_id,
+                        &format!("user-{index}"),
+                        &assistant_message_id,
+                        &format!("prompt {index}"),
+                        index,
+                    )?;
+                    db.append_agent_text_chunk(&session_id, &assistant_message_id, reply, index)?;
+                    db.finish_agent_turn(
+                        &session_id,
+                        &turn_id,
+                        &assistant_message_id,
+                        "completed",
+                        Some("end_turn"),
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(reply),
+                        index,
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let through_seq = manager
+            .with_db(|db| db.find_agent_session_by_id(&session_id))
+            .unwrap()
+            .unwrap()
+            .latest_seq;
+
+        let newest = manager
+            .list_session_turns(ListAgentSessionTurnsReq {
+                session_id: session_id.clone(),
+                through_seq,
+                cursor: None,
+                limit: 1,
+            })
+            .unwrap();
+        assert_eq!(newest.turns[0].turn.turn_id, "turn-2");
+        assert_eq!(
+            newest.turns[0].messages[1].content,
+            vec![AgentContent::Text {
+                text: "second reply".to_string(),
+            }]
+        );
+        let older = manager
+            .list_session_turns(ListAgentSessionTurnsReq {
+                session_id,
+                through_seq,
+                cursor: newest.next_cursor,
+                limit: 1,
+            })
+            .unwrap();
+        assert_eq!(older.turns[0].turn.turn_id, "turn-1");
+        assert!(older.next_cursor.is_none());
     }
 
     #[test]
