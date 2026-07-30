@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use rieul_daemon_core::rpc::{
     JobInfo, JobOutputState, JobOutputStream, JobRunReason, JobStatus, ScheduleInfo,
 };
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 
 pub struct DaemonStateDb {
     path: PathBuf,
@@ -79,6 +79,12 @@ pub struct StoredAgentSession {
     pub active_turn_state_kind: Option<String>,
 }
 
+pub struct UpdatedAgentSession {
+    pub session: StoredAgentSession,
+    pub seq: u64,
+    pub catalog_revision: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoredAgentWorkspaceFilter {
     Any,
@@ -116,6 +122,45 @@ pub struct StoredAgentTurn {
     pub finished_at_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAgentTurnRecord {
+    pub turn: StoredAgentTurn,
+    pub completed_seq: u64,
+    pub messages: Vec<StoredAgentMessage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAgentMessage {
+    pub message_id: String,
+    pub turn_id: Option<String>,
+    pub role_kind: String,
+    pub role_other: Option<String>,
+    pub state_kind: String,
+    pub created_at_ms: u64,
+    pub content: Vec<StoredAgentMessageContent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredAgentMessageContent {
+    Text {
+        text: String,
+    },
+    Image {
+        mime_type: String,
+        data: Vec<u8>,
+    },
+    ResourceLink {
+        uri: String,
+        name: Option<String>,
+        mime_type: Option<String>,
+    },
+    EmbeddedText {
+        uri: String,
+        mime_type: Option<String>,
+        text: String,
+    },
+}
+
 pub struct CreatedAgentTurn {
     pub turn_seq: u64,
     pub user_message_seq: u64,
@@ -127,6 +172,12 @@ pub struct FinishedAgentTurn {
     pub assistant_message_seq: u64,
     pub turn_seq: u64,
     pub catalog_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredAgentConfigValue {
+    String { config_id: String, value: String },
+    Boolean { config_id: String, value: bool },
 }
 
 impl DaemonStateDb {
@@ -676,6 +727,47 @@ impl DaemonStateDb {
         Ok(sessions)
     }
 
+    pub fn update_agent_session(
+        &mut self,
+        session_id: &str,
+        title: Option<Option<&str>>,
+        archived: Option<bool>,
+        now_ms: u64,
+    ) -> Result<UpdatedAgentSession> {
+        let tx = self
+            .connection
+            .transaction()
+            .context("start agent session update")?;
+        let updated = tx
+            .execute(
+                "UPDATE agent_sessions
+                 SET title = CASE WHEN ?2 = 1 THEN ?3 ELSE title END,
+                     archived = COALESCE(?4, archived)
+                 WHERE session_id = ?1",
+                rusqlite::params![
+                    session_id,
+                    bool_to_i64(title.is_some()),
+                    title.flatten(),
+                    archived.map(bool_to_i64),
+                ],
+            )
+            .context("update agent session metadata")?;
+        if updated == 0 {
+            bail!("agent session was not found");
+        }
+        let seq = advance_agent_session_seq(&tx, session_id, 1, now_ms)?;
+        let catalog_revision = record_agent_catalog_change(&tx, session_id, now_ms)?;
+        tx.commit().context("commit agent session update")?;
+        let session = self
+            .find_agent_session_by_id(session_id)?
+            .context("agent session disappeared after update")?;
+        Ok(UpdatedAgentSession {
+            session,
+            seq,
+            catalog_revision,
+        })
+    }
+
     pub fn agent_session_catalog_revision(&self) -> Result<u64> {
         self.connection
             .query_row(
@@ -725,6 +817,173 @@ impl DaemonStateDb {
             )
             .optional()
             .context("find agent turn by client request")
+    }
+
+    pub fn list_completed_agent_turns(
+        &self,
+        session_id: &str,
+        through_seq: u64,
+        cursor: Option<(u64, String)>,
+        limit: usize,
+    ) -> Result<Vec<StoredAgentTurnRecord>> {
+        let cursor_seq = cursor.as_ref().map(|(seq, _)| *seq as i64);
+        let cursor_turn_id = cursor.as_ref().map(|(_, turn_id)| turn_id.as_str());
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT turn_id, session_id, state_kind, stop_reason_kind,
+                        stop_reason_other, failure_message, failure_code,
+                        failure_retryable, created_at_ms, started_at_ms, finished_at_ms,
+                        completed_seq
+                 FROM agent_session_turns
+                 WHERE session_id = ?1
+                   AND completed_seq IS NOT NULL
+                   AND completed_seq <= ?2
+                   AND (
+                     ?3 IS NULL
+                     OR completed_seq < ?3
+                     OR (completed_seq = ?3 AND turn_id < ?4)
+                   )
+                 ORDER BY completed_seq DESC, turn_id DESC
+                 LIMIT ?5",
+            )
+            .context("prepare completed agent turns list")?;
+        let turns = statement
+            .query_map(
+                rusqlite::params![
+                    session_id,
+                    through_seq as i64,
+                    cursor_seq,
+                    cursor_turn_id,
+                    limit as i64,
+                ],
+                |row| {
+                    Ok((
+                        stored_agent_turn_from_row(row)?,
+                        row.get::<_, i64>(11)? as u64,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("list completed agent turns")?;
+
+        turns
+            .into_iter()
+            .map(|(turn, completed_seq)| {
+                let messages = self.load_agent_turn_messages(session_id, &turn.turn_id)?;
+                Ok(StoredAgentTurnRecord {
+                    turn,
+                    completed_seq,
+                    messages,
+                })
+            })
+            .collect()
+    }
+
+    fn load_agent_turn_messages(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<Vec<StoredAgentMessage>> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT message_id, turn_id, role_kind, role_other, state_kind, created_at_ms
+                 FROM agent_messages
+                 WHERE session_id = ?1 AND turn_id = ?2
+                 ORDER BY created_at_ms,
+                          CASE role_kind
+                            WHEN 'user' THEN 0
+                            WHEN 'assistant' THEN 1
+                            ELSE 2
+                          END,
+                          message_id",
+            )
+            .context("prepare agent turn messages")?;
+        let messages = statement
+            .query_map((session_id, turn_id), |row| {
+                Ok(StoredAgentMessage {
+                    message_id: row.get(0)?,
+                    turn_id: row.get(1)?,
+                    role_kind: row.get(2)?,
+                    role_other: row.get(3)?,
+                    state_kind: row.get(4)?,
+                    created_at_ms: row.get::<_, i64>(5)? as u64,
+                    content: Vec::new(),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("load agent turn messages")?;
+
+        messages
+            .into_iter()
+            .map(|mut message| {
+                message.content =
+                    self.load_agent_message_content(session_id, &message.message_id)?;
+                Ok(message)
+            })
+            .collect()
+    }
+
+    fn load_agent_message_content(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<Vec<StoredAgentMessageContent>> {
+        type ContentRow = (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<Vec<u8>>,
+            Option<String>,
+            Option<String>,
+        );
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT content_kind, text_value, mime_type, data, uri, name
+                 FROM agent_message_contents
+                 WHERE session_id = ?1 AND message_id = ?2
+                 ORDER BY content_index",
+            )
+            .context("prepare agent message content")?;
+        let rows = statement
+            .query_map((session_id, message_id), |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<ContentRow>>>()
+            .context("load agent message content")?;
+        rows.into_iter()
+            .map(
+                |(kind, text, mime_type, data, uri, name)| match kind.as_str() {
+                    "text" => Ok(StoredAgentMessageContent::Text {
+                        text: text.context("text agent content has no text")?,
+                    }),
+                    "image" => Ok(StoredAgentMessageContent::Image {
+                        mime_type: mime_type.context("image agent content has no MIME type")?,
+                        data: data.context("image agent content has no data")?,
+                    }),
+                    "resource_link" => Ok(StoredAgentMessageContent::ResourceLink {
+                        uri: uri.context("resource-link agent content has no URI")?,
+                        name,
+                        mime_type,
+                    }),
+                    "embedded_text" => Ok(StoredAgentMessageContent::EmbeddedText {
+                        uri: uri.context("embedded-text agent content has no URI")?,
+                        mime_type,
+                        text: text.context("embedded-text agent content has no text")?,
+                    }),
+                    _ => bail!("unknown agent message content kind '{kind}'"),
+                },
+            )
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -825,6 +1084,37 @@ impl DaemonStateDb {
         Ok(seq)
     }
 
+    pub fn replace_agent_session_config_values(
+        &mut self,
+        session_id: &str,
+        values: &[StoredAgentConfigValue],
+        now_ms: u64,
+    ) -> Result<()> {
+        let tx = self
+            .connection
+            .transaction()
+            .context("start agent session config replacement")?;
+        replace_agent_session_config_values(&tx, session_id, values, now_ms)?;
+        tx.commit()
+            .context("commit agent session config replacement")
+    }
+
+    pub fn replace_agent_session_config_values_and_advance(
+        &mut self,
+        session_id: &str,
+        values: &[StoredAgentConfigValue],
+        now_ms: u64,
+    ) -> Result<u64> {
+        let tx = self
+            .connection
+            .transaction()
+            .context("start agent session config update")?;
+        replace_agent_session_config_values(&tx, session_id, values, now_ms)?;
+        let seq = advance_agent_session_seq(&tx, session_id, 1, now_ms)?;
+        tx.commit().context("commit agent session config update")?;
+        Ok(seq)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn finish_agent_turn(
         &mut self,
@@ -888,7 +1178,7 @@ impl DaemonStateDb {
 }
 
 fn advance_agent_session_seq(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &Transaction<'_>,
     session_id: &str,
     count: u64,
     now_ms: u64,
@@ -913,11 +1203,43 @@ fn advance_agent_session_seq(
     .context("read agent session sequence")
 }
 
-fn record_agent_catalog_change(
-    tx: &rusqlite::Transaction<'_>,
+fn replace_agent_session_config_values(
+    tx: &Transaction<'_>,
     session_id: &str,
+    values: &[StoredAgentConfigValue],
     now_ms: u64,
-) -> Result<u64> {
+) -> Result<()> {
+    tx.execute(
+        "DELETE FROM agent_session_config_values WHERE session_id = ?1",
+        [session_id],
+    )
+    .context("clear agent session config values")?;
+    for value in values {
+        match value {
+            StoredAgentConfigValue::String { config_id, value } => {
+                tx.execute(
+                    "INSERT INTO agent_session_config_values (
+                       session_id, config_id, value_kind, string_value, updated_at_ms
+                     ) VALUES (?1, ?2, 'string', ?3, ?4)",
+                    rusqlite::params![session_id, config_id, value, now_ms as i64],
+                )
+                .context("store agent session string config value")?;
+            }
+            StoredAgentConfigValue::Boolean { config_id, value } => {
+                tx.execute(
+                    "INSERT INTO agent_session_config_values (
+                       session_id, config_id, value_kind, boolean_value, updated_at_ms
+                     ) VALUES (?1, ?2, 'boolean', ?3, ?4)",
+                    rusqlite::params![session_id, config_id, bool_to_i64(*value), now_ms as i64],
+                )
+                .context("store agent session boolean config value")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn record_agent_catalog_change(tx: &Transaction<'_>, session_id: &str, now_ms: u64) -> Result<u64> {
     tx.execute(
         "UPDATE agent_session_catalog_state SET revision = revision + 1 WHERE singleton = 1",
         [],
@@ -1338,6 +1660,132 @@ mod tests {
             )
             .unwrap();
         assert_eq!(contents, "Hello");
+
+        let history = db
+            .list_completed_agent_turns("session-text", session.latest_seq, None, 10)
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].turn.turn_id, "turn-text");
+        assert_eq!(history[0].completed_seq, 6);
+        assert_eq!(
+            history[0].messages,
+            vec![
+                StoredAgentMessage {
+                    message_id: "message-user".to_string(),
+                    turn_id: Some("turn-text".to_string()),
+                    role_kind: "user".to_string(),
+                    role_other: None,
+                    state_kind: "complete".to_string(),
+                    created_at_ms: 2,
+                    content: vec![StoredAgentMessageContent::Text {
+                        text: "Say hello".to_string(),
+                    }],
+                },
+                StoredAgentMessage {
+                    message_id: "message-assistant".to_string(),
+                    turn_id: Some("turn-text".to_string()),
+                    role_kind: "assistant".to_string(),
+                    role_other: None,
+                    state_kind: "complete".to_string(),
+                    created_at_ms: 2,
+                    content: vec![StoredAgentMessageContent::Text {
+                        text: "Hello".to_string(),
+                    }],
+                },
+            ]
+        );
+        assert!(db
+            .list_completed_agent_turns("session-text", 5, None, 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn replaces_agent_config_values_and_advances_session_sequence() {
+        let mut db = DaemonStateDb::open_in_memory_for_tests().unwrap();
+        db.create_agent_session(
+            &NewAgentSession {
+                session_id: "session-config".to_string(),
+                provider_id: "codex".to_string(),
+                title: None,
+                workspace_kind: "task".to_string(),
+                project_id: None,
+                task_workspace_id: Some("workspace-config".to_string()),
+                cwd: "<temporary-workspace>".to_string(),
+                creation_request_id: "create-config".to_string(),
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            },
+            Some(&NewAgentTaskWorkspace {
+                task_workspace_id: "workspace-config".to_string(),
+                root_path: "<temporary-workspace>".to_string(),
+                source_kind: "empty".to_string(),
+                source_project_id: None,
+                git_base_ref: None,
+                copy_include_untracked: None,
+                state_kind: "ready".to_string(),
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            }),
+        )
+        .unwrap();
+
+        db.replace_agent_session_config_values(
+            "session-config",
+            &[
+                StoredAgentConfigValue::String {
+                    config_id: "reasoning_effort".to_string(),
+                    value: "medium".to_string(),
+                },
+                StoredAgentConfigValue::Boolean {
+                    config_id: "fast_mode".to_string(),
+                    value: false,
+                },
+            ],
+            2,
+        )
+        .unwrap();
+        let seq = db
+            .replace_agent_session_config_values_and_advance(
+                "session-config",
+                &[StoredAgentConfigValue::String {
+                    config_id: "reasoning_effort".to_string(),
+                    value: "high".to_string(),
+                }],
+                3,
+            )
+            .unwrap();
+
+        assert_eq!(seq, 1);
+        let rows = db
+            .connection
+            .prepare(
+                "SELECT config_id, value_kind, string_value, boolean_value
+                 FROM agent_session_config_values
+                 WHERE session_id = ?1
+                 ORDER BY config_id",
+            )
+            .unwrap()
+            .query_map(["session-config"], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                "reasoning_effort".to_string(),
+                "string".to_string(),
+                Some("high".to_string()),
+                None,
+            )]
+        );
     }
 
     #[test]

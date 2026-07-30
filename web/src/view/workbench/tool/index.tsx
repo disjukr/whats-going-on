@@ -1,6 +1,7 @@
 import { useAtomValue } from "jotai";
 import { useBunja } from "bunja/react";
 import { workbenchTabBunja } from "../../../state/workbench.ts";
+import { AgentTool } from "./agent/index.tsx";
 import { DaemonTool } from "./daemon/index.tsx";
 import { FilesTool } from "./files/index.tsx";
 import { ProcessesTool } from "./processes/index.tsx";
@@ -12,6 +13,9 @@ export function WorkbenchToolContent() {
   const tab = useAtomValue(tabState.tabAtom);
 
   if (!tab) return null;
+  if (tab.tool === "agent") {
+    return <AgentTool />;
+  }
   if (tab.tool === "daemon") {
     return <DaemonTool />;
   }

@@ -153,6 +153,7 @@ Protocol proc id registry:
 | 60 | `RemoveAgentProject`             |
 | 61 | `ListAgentSessionTurns`          |
 | 62 | `ReadAgentTerminalOutput`        |
+| 63 | `AttachAgentSession`             |
 
 `GetDaemonInfo` returns daemon metadata: supported proc ids, daemon version, a
 human-readable OS name for the daemon host, daemon instance lifecycle fields,

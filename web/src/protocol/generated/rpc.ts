@@ -65,6 +65,7 @@ export enum ProcId {
   RemoveAgentProject = 60,
   ListAgentSessionTurns = 61,
   ReadAgentTerminalOutput = 62,
+  AttachAgentSession = 63,
 }
 
 export interface SubscribeWindowDetailReq {
@@ -1159,6 +1160,10 @@ export interface CreateAgentSessionReq {
   creationRequestId: string;
 }
 
+export interface AttachAgentSessionReq {
+  sessionId: string;
+}
+
 export interface SubscribeAgentSessionReq {
   sessionId: string;
 }
@@ -1185,6 +1190,11 @@ export interface SetAgentSessionConfigReq {
   sessionId: string;
   configId: string;
   value: AgentConfigValue;
+}
+
+export interface SetAgentSessionConfigRes {
+  seq: number;
+  configOptions: AgentConfigOption[];
 }
 
 export interface UpdateAgentSessionReq {
@@ -1649,7 +1659,16 @@ export interface AgentConfigOption {
   title: string;
   description?: string;
   input: AgentConfigInput;
+  category?: AgentConfigOptionCategory;
 }
+
+export type AgentConfigOptionCategory =
+  | { type: "mode" }
+  | { type: "model" }
+  | { type: "modelConfig" }
+  | { type: "thoughtLevel" }
+  | { type: "other"; name: string }
+;
 
 export type AgentConfigInput =
   | { type: "select"; currentValue: string; options: AgentConfigSelectOption[] }
@@ -1661,6 +1680,12 @@ export interface AgentConfigSelectOption {
   value: string;
   title: string;
   description?: string;
+  group?: AgentConfigSelectGroup;
+}
+
+export interface AgentConfigSelectGroup {
+  groupId: string;
+  title: string;
 }
 
 export type AgentConfigValue =
@@ -2359,15 +2384,15 @@ export const respondAgentPermissionProc: ProcCodec<RespondAgentPermissionReq, un
   decodeError: decodeAgentRpcErrorValue,
 };
 
-export const setAgentSessionConfigProc: ProcCodec<SetAgentSessionConfigReq, undefined, AgentRpcError> = {
+export const setAgentSessionConfigProc: ProcCodec<SetAgentSessionConfigReq, SetAgentSessionConfigRes, AgentRpcError> = {
   id: ProcId.SetAgentSessionConfig,
   name: "SetAgentSessionConfig",
   stream: "unary",
   requestType: "SetAgentSessionConfigReq",
-  responseType: "void",
+  responseType: "SetAgentSessionConfigRes",
   errorType: "AgentRpcError",
   encodeRequest: encodeSetAgentSessionConfigReqValue,
-  decodeResponse: decodeVoidValue,
+  decodeResponse: decodeSetAgentSessionConfigResValue,
   decodeError: decodeAgentRpcErrorValue,
 };
 
@@ -2443,6 +2468,18 @@ export const readAgentTerminalOutputProc: ProcCodec<ReadAgentTerminalOutputReq, 
   decodeError: decodeAgentRpcErrorValue,
 };
 
+export const attachAgentSessionProc: ProcCodec<AttachAgentSessionReq, AgentSessionInfo, AgentRpcError> = {
+  id: ProcId.AttachAgentSession,
+  name: "AttachAgentSession",
+  stream: "unary",
+  requestType: "AttachAgentSessionReq",
+  responseType: "AgentSessionInfo",
+  errorType: "AgentRpcError",
+  encodeRequest: encodeAttachAgentSessionReqValue,
+  decodeResponse: decodeAgentSessionInfoValue,
+  decodeError: decodeAgentRpcErrorValue,
+};
+
 export const procs = {
   [ProcId.GetDaemonInfo]: getDaemonInfoProc,
   [ProcId.StartPairing]: startPairingProc,
@@ -2506,6 +2543,7 @@ export const procs = {
   [ProcId.RemoveAgentProject]: removeAgentProjectProc,
   [ProcId.ListAgentSessionTurns]: listAgentSessionTurnsProc,
   [ProcId.ReadAgentTerminalOutput]: readAgentTerminalOutputProc,
+  [ProcId.AttachAgentSession]: attachAgentSessionProc,
 } as const;
 
 export function encodeSubscribeWindowDetailReqValue(value: SubscribeWindowDetailReq): CborValue {
@@ -7544,6 +7582,19 @@ export function decodeCreateAgentSessionReqValue(value: CborValue): CreateAgentS
   };
 }
 
+export function encodeAttachAgentSessionReqValue(value: AttachAgentSessionReq): CborValue {
+  const fields = new Map<number, CborValue>();
+  fields.set(1, text(required(value.sessionId, "AttachAgentSessionReq.sessionId")));
+  return fields;
+}
+
+export function decodeAttachAgentSessionReqValue(value: CborValue): AttachAgentSessionReq {
+  const fields = expectMap(value);
+  return {
+    sessionId: fieldOrDefault(fields.get(1), (value) => textValue(value), () => ""),
+  };
+}
+
 export function encodeSubscribeAgentSessionReqValue(value: SubscribeAgentSessionReq): CborValue {
   const fields = new Map<number, CborValue>();
   fields.set(1, text(required(value.sessionId, "SubscribeAgentSessionReq.sessionId")));
@@ -7622,6 +7673,21 @@ export function decodeSetAgentSessionConfigReqValue(value: CborValue): SetAgentS
     sessionId: fieldOrDefault(fields.get(1), (value) => textValue(value), () => ""),
     configId: fieldOrDefault(fields.get(2), (value) => textValue(value), () => ""),
     value: fieldOrDefault(fields.get(3), (value) => decodeAgentConfigValueValue(value), () => defaultAgentConfigValue()),
+  };
+}
+
+export function encodeSetAgentSessionConfigResValue(value: SetAgentSessionConfigRes): CborValue {
+  const fields = new Map<number, CborValue>();
+  fields.set(1, u53(required(value.seq, "SetAgentSessionConfigRes.seq")));
+  fields.set(2, required(value.configOptions, "SetAgentSessionConfigRes.configOptions").map((item) => encodeAgentConfigOptionValue(item)));
+  return fields;
+}
+
+export function decodeSetAgentSessionConfigResValue(value: CborValue): SetAgentSessionConfigRes {
+  const fields = expectMap(value);
+  return {
+    seq: fieldOrDefault(fields.get(1), (value) => integer(value), () => 0),
+    configOptions: fieldOrDefault(fields.get(2), (value) => array(value).map((item) => decodeAgentConfigOptionValue(item)), () => []),
   };
 }
 
@@ -9551,6 +9617,7 @@ export function encodeAgentConfigOptionValue(value: AgentConfigOption): CborValu
   fields.set(2, text(required(value.title, "AgentConfigOption.title")));
   if (value.description !== undefined) fields.set(3, text(value.description));
   fields.set(4, encodeAgentConfigInputValue(required(value.input, "AgentConfigOption.input")));
+  if (value.category !== undefined) fields.set(5, encodeAgentConfigOptionCategoryValue(value.category));
   return fields;
 }
 
@@ -9561,7 +9628,62 @@ export function decodeAgentConfigOptionValue(value: CborValue): AgentConfigOptio
     title: fieldOrDefault(fields.get(2), (value) => textValue(value), () => ""),
     description: optionalField(fields.get(3), (value) => textValue(value)),
     input: fieldOrDefault(fields.get(4), (value) => decodeAgentConfigInputValue(value), () => defaultAgentConfigInput()),
+    category: optionalField(fields.get(5), (value) => decodeAgentConfigOptionCategoryValue(value)),
   };
+}
+
+export function encodeAgentConfigOptionCategoryValue(value: AgentConfigOptionCategory): CborValue {
+  switch (value.type) {
+    case "mode": {
+      const fields = new Map<number, CborValue>();
+      return [1, fields];
+    }
+    case "model": {
+      const fields = new Map<number, CborValue>();
+      return [2, fields];
+    }
+    case "modelConfig": {
+      const fields = new Map<number, CborValue>();
+      return [3, fields];
+    }
+    case "thoughtLevel": {
+      const fields = new Map<number, CborValue>();
+      return [4, fields];
+    }
+    case "other": {
+      const fields = new Map<number, CborValue>();
+      fields.set(1, text(required(value.name, "AgentConfigOptionCategory.Other.name")));
+      return [5, fields];
+    }
+  }
+}
+
+export function decodeAgentConfigOptionCategoryValue(value: CborValue): AgentConfigOptionCategory {
+  const [variantId, fields] = expectUnion(value);
+  switch (variantId) {
+    case 1:
+      return {
+        type: "mode",
+      };
+    case 2:
+      return {
+        type: "model",
+      };
+    case 3:
+      return {
+        type: "modelConfig",
+      };
+    case 4:
+      return {
+        type: "thoughtLevel",
+      };
+    case 5:
+      return {
+        type: "other",
+        name: fieldOrDefault(fields.get(1), (value) => textValue(value), () => ""),
+      };
+  }
+  throw new Error(`unknown AgentConfigOptionCategory variant ${variantId}`);
 }
 
 export function encodeAgentConfigInputValue(value: AgentConfigInput): CborValue {
@@ -9615,6 +9737,7 @@ export function encodeAgentConfigSelectOptionValue(value: AgentConfigSelectOptio
   fields.set(1, text(required(value.value, "AgentConfigSelectOption.value")));
   fields.set(2, text(required(value.title, "AgentConfigSelectOption.title")));
   if (value.description !== undefined) fields.set(3, text(value.description));
+  if (value.group !== undefined) fields.set(4, encodeAgentConfigSelectGroupValue(value.group));
   return fields;
 }
 
@@ -9624,6 +9747,22 @@ export function decodeAgentConfigSelectOptionValue(value: CborValue): AgentConfi
     value: fieldOrDefault(fields.get(1), (value) => textValue(value), () => ""),
     title: fieldOrDefault(fields.get(2), (value) => textValue(value), () => ""),
     description: optionalField(fields.get(3), (value) => textValue(value)),
+    group: optionalField(fields.get(4), (value) => decodeAgentConfigSelectGroupValue(value)),
+  };
+}
+
+export function encodeAgentConfigSelectGroupValue(value: AgentConfigSelectGroup): CborValue {
+  const fields = new Map<number, CborValue>();
+  fields.set(1, text(required(value.groupId, "AgentConfigSelectGroup.groupId")));
+  fields.set(2, text(required(value.title, "AgentConfigSelectGroup.title")));
+  return fields;
+}
+
+export function decodeAgentConfigSelectGroupValue(value: CborValue): AgentConfigSelectGroup {
+  const fields = expectMap(value);
+  return {
+    groupId: fieldOrDefault(fields.get(1), (value) => textValue(value), () => ""),
+    title: fieldOrDefault(fields.get(2), (value) => textValue(value), () => ""),
   };
 }
 
@@ -10948,6 +11087,12 @@ function defaultCreateAgentSessionReq(): CreateAgentSessionReq {
   };
 }
 
+function defaultAttachAgentSessionReq(): AttachAgentSessionReq {
+  return {
+    sessionId: "",
+  };
+}
+
 function defaultSubscribeAgentSessionReq(): SubscribeAgentSessionReq {
   return {
     sessionId: "",
@@ -10982,6 +11127,13 @@ function defaultSetAgentSessionConfigReq(): SetAgentSessionConfigReq {
     sessionId: "",
     configId: "",
     value: defaultAgentConfigValue(),
+  };
+}
+
+function defaultSetAgentSessionConfigRes(): SetAgentSessionConfigRes {
+  return {
+    seq: 0,
+    configOptions: [],
   };
 }
 
@@ -11386,6 +11538,12 @@ function defaultAgentConfigOption(): AgentConfigOption {
   };
 }
 
+function defaultAgentConfigOptionCategory(): AgentConfigOptionCategory {
+  return {
+    type: "mode",
+  };
+}
+
 function defaultAgentConfigInput(): AgentConfigInput {
   return {
     type: "select",
@@ -11397,6 +11555,13 @@ function defaultAgentConfigInput(): AgentConfigInput {
 function defaultAgentConfigSelectOption(): AgentConfigSelectOption {
   return {
     value: "",
+    title: "",
+  };
+}
+
+function defaultAgentConfigSelectGroup(): AgentConfigSelectGroup {
+  return {
+    groupId: "",
     title: "",
   };
 }

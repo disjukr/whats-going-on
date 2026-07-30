@@ -69,6 +69,7 @@ import {
   removeAgentProjectProc,
   listAgentSessionTurnsProc,
   readAgentTerminalOutputProc,
+  attachAgentSessionProc,
 } from "./rpc.ts";
 import type {
   ActiveAgentSessionsTableEvent,
@@ -80,6 +81,7 @@ import type {
   AgentSessionInfo,
   AgentTerminalOutputEvent,
   AgentTurnInfo,
+  AttachAgentSessionReq,
   AttachTerminalSessionReq,
   AvailableShellsTableEvent,
   BulkJobMutationRes,
@@ -138,6 +140,7 @@ import type {
   ScheduleInfo,
   SchedulesTableEvent,
   SetAgentSessionConfigReq,
+  SetAgentSessionConfigRes,
   StartPairingReq,
   StartPairingRes,
   SubscribeAgentSessionCatalogReq,
@@ -386,7 +389,7 @@ export function respondAgentPermission(transport: WebTransport, request: Respond
   return callUnary(transport, respondAgentPermissionProc, request);
 }
 
-export function setAgentSessionConfig(transport: WebTransport, request: SetAgentSessionConfigReq): Promise<undefined> {
+export function setAgentSessionConfig(transport: WebTransport, request: SetAgentSessionConfigReq): Promise<SetAgentSessionConfigRes> {
   return callUnary(transport, setAgentSessionConfigProc, request);
 }
 
@@ -412,4 +415,8 @@ export function listAgentSessionTurns(transport: WebTransport, request: ListAgen
 
 export function readAgentTerminalOutput(transport: WebTransport, request: ReadAgentTerminalOutputReq): AsyncGenerator<AgentTerminalOutputEvent> {
   return callServerStream(transport, readAgentTerminalOutputProc, request);
+}
+
+export function attachAgentSession(transport: WebTransport, request: AttachAgentSessionReq): Promise<AgentSessionInfo> {
+  return callUnary(transport, attachAgentSessionProc, request);
 }
