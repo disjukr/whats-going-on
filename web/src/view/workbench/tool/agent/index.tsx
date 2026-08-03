@@ -12,6 +12,7 @@ import {
   AlertCircle,
   ArrowUp,
   Bot,
+  ChevronDown,
   ChevronRight,
   LoaderCircle,
   RefreshCw,
@@ -44,6 +45,10 @@ import { workbenchTabBunja } from "../../../../state/workbench.ts";
 import { className } from "../../../class-name.ts";
 
 type LivePhase = "connecting" | "live" | "error";
+type ReconnectMode = "auto" | "manual";
+
+const MAX_AUTO_RECONNECT_TIMEOUTS = 5;
+const MAX_AUTO_RECONNECT_DELAY_MS = 8_000;
 
 interface LiveSessionState {
   configOptions: AgentConfigOption[];
@@ -104,13 +109,36 @@ const configSelectClassName =
   "max-w-[190px] appearance-none border-0 bg-transparent pr-[2px] text-[10px] font-680 text-rieul-text outline-none disabled:opacity-50";
 const configToggleClassName = [
   "relative h-[16px] w-[28px] appearance-none rounded-full border-0 p-0 transition-colors",
-  "after:absolute after:left-[2px] after:top-[2px] after:h-[12px] after:w-[12px] after:rounded-full",
+  "after:absolute after:left-[2px] after:top-[2px] after:h-[12px] after:w-[12px] after:rounded-full after:content-['']",
   "after:bg-white after:shadow-sm after:transition-transform disabled:opacity-50",
 ].join(" ");
 const composerClassName = [
-  "mx-auto grid max-w-[820px] grid-cols-[minmax(0,1fr)_34px] items-end gap-[8px]",
+  "mx-auto grid max-w-[820px] gap-[3px]",
   "rounded-[15px] border border-black/10 bg-white/82 p-[7px] shadow-[0_8px_24px_rgba(20,30,46,0.07)]",
   "focus-within:border-rieul-accent/38 focus-within:ring-2 focus-within:ring-rieul-accent/10",
+].join(" ");
+const composerFooterClassName =
+  "flex min-w-0 flex-wrap items-center gap-x-[8px] gap-y-[4px] pl-[5px]";
+const composerConfigGroupClassName =
+  "flex min-w-0 flex-wrap items-center gap-[3px]";
+const composerConfigControlClassName = [
+  "inline-flex h-[30px] min-w-0 items-center gap-[4px] rounded-[8px] px-[5px]",
+  "text-[10px] text-rieul-text-3 hover:bg-black/4",
+].join(" ");
+const composerConfigSelectClassName = [
+  "min-w-0 max-w-[160px] appearance-none border-0 bg-transparent px-[2px]",
+  "text-[10px] font-680 text-rieul-text outline-none disabled:opacity-50",
+].join(" ");
+const composerActionsClassName =
+  "ml-auto flex min-w-0 flex-wrap items-center justify-end gap-[3px]";
+const composerSettingsTriggerClassName = [
+  "inline-flex h-[30px] max-w-[280px] appearance-none items-center gap-[5px] rounded-[8px]",
+  "border-0 bg-transparent px-[7px] text-[10px] font-680 text-rieul-text cursor-pointer",
+  "hover:bg-black/4 disabled:cursor-default disabled:opacity-50",
+].join(" ");
+const composerSettingsPopoverClassName = [
+  "absolute bottom-[calc(100%+7px)] right-0 z-20 grid min-w-[240px] max-w-[min(360px,calc(100vw-48px))] gap-[5px]",
+  "rounded-[13px] border border-black/9 bg-white/92 p-[7px] shadow-[0_14px_36px_rgba(20,30,46,0.14)] backdrop-blur-xl",
 ].join(" ");
 const textareaClassName = [
   "max-h-[180px] min-h-[36px] w-full resize-none border-0 bg-transparent px-[7px] py-[8px]",
@@ -279,6 +307,8 @@ function AgentConversation({ sessionId }: { sessionId: string }) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
+  const [manualReconnectRequired, setManualReconnectRequired] = useState(false);
+  const [autoReconnectRetryVersion, setAutoReconnectRetryVersion] = useState(0);
   const [subscriptionVersion, setSubscriptionVersion] = useState(0);
   const [changingConfigId, setChangingConfigId] = useState<string>();
   const [history, setHistory] = useState<HistoryState>(() =>
@@ -287,6 +317,8 @@ function AgentConversation({ sessionId }: { sessionId: string }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const stickToBottomRef = useRef(true);
+  const reconnectTimeoutCountRef = useRef(0);
+  const reconnectAttemptIdRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -395,6 +427,33 @@ function AgentConversation({ sessionId }: { sessionId: string }) {
       summary?.attachment === AgentAttachmentState.Failed);
 
   useEffect(() => {
+    reconnectTimeoutCountRef.current = 0;
+    reconnectAttemptIdRef.current += 1;
+    setManualReconnectRequired(false);
+    setAutoReconnectRetryVersion(0);
+    setReconnecting(false);
+    return () => {
+      reconnectAttemptIdRef.current += 1;
+    };
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!canReconnect || reconnecting || manualReconnectRequired) return;
+    const timeoutCount = reconnectTimeoutCountRef.current;
+    const timer = globalThis.setTimeout(
+      () => void reconnect("auto"),
+      autoReconnectDelayMs(timeoutCount),
+    );
+    return () => globalThis.clearTimeout(timer);
+  }, [
+    autoReconnectRetryVersion,
+    canReconnect,
+    manualReconnectRequired,
+    reconnecting,
+    sessionId,
+  ]);
+
+  useEffect(() => {
     if (!summary) return;
     tabState.setAgentSession(sessionId, title);
   }, [sessionId, title]);
@@ -434,8 +493,9 @@ function AgentConversation({ sessionId }: { sessionId: string }) {
     }
   }
 
-  async function reconnect() {
+  async function reconnect(mode: ReconnectMode) {
     if (!canReconnect || reconnecting) return;
+    const attemptId = ++reconnectAttemptIdRef.current;
     setReconnecting(true);
     setState((current) => ({ ...current, error: undefined }));
     try {
@@ -443,16 +503,39 @@ function AgentConversation({ sessionId }: { sessionId: string }) {
         await rpcSession.webTransport(),
         { sessionId },
       );
+      if (attemptId !== reconnectAttemptIdRef.current) return;
+      reconnectTimeoutCountRef.current = 0;
+      setManualReconnectRequired(false);
       setState((current) => ({ ...current, session }));
       setSubscriptionVersion((version) => version + 1);
       void agents.refreshSessions();
     } catch (cause) {
-      setState((current) => ({
-        ...current,
-        error: errorMessage(cause),
-      }));
+      if (attemptId !== reconnectAttemptIdRef.current) return;
+      if (mode === "auto" && isTimeoutError(cause)) {
+        const timeoutCount = reconnectTimeoutCountRef.current + 1;
+        reconnectTimeoutCountRef.current = timeoutCount;
+        if (timeoutCount >= MAX_AUTO_RECONNECT_TIMEOUTS) {
+          setManualReconnectRequired(true);
+          setState((current) => ({
+            ...current,
+            error:
+              "Reconnect timed out five times. Reconnect manually to try again.",
+          }));
+        } else {
+          setAutoReconnectRetryVersion((version) => version + 1);
+        }
+      } else {
+        reconnectTimeoutCountRef.current = 0;
+        setManualReconnectRequired(true);
+        setState((current) => ({
+          ...current,
+          error: errorMessage(cause),
+        }));
+      }
     } finally {
-      setReconnecting(false);
+      if (attemptId === reconnectAttemptIdRef.current) {
+        setReconnecting(false);
+      }
     }
   }
 
@@ -529,16 +612,36 @@ function AgentConversation({ sessionId }: { sessionId: string }) {
     void sendTurn();
   }
 
+  const modeOptions = state.configOptions.filter((option) =>
+    option.category?.type === "mode" && !isCollaborationModeOption(option)
+  );
+  const rightComposerOptions = [
+    ...state.configOptions.filter((option) =>
+      option.category?.type === "model"
+    ),
+    ...state.configOptions.filter((option) =>
+      option.category?.type === "modelConfig"
+    ),
+    ...state.configOptions.filter((option) =>
+      option.category?.type === "thoughtLevel"
+    ),
+  ];
+  const otherOptions = state.configOptions.filter((option) =>
+    !isCollaborationModeOption(option) &&
+    (option.category === undefined || option.category.type === "other")
+  );
+  const configDisabled = state.phase !== "live" || !attached || turnBusy;
+
   return (
     <div className={shellClassName}>
       <header className={headerClassName}>
         <span className={headerTitleClassName}>{title}</span>
-        {canReconnect
+        {canReconnect && manualReconnectRequired
           ? (
             <button
               type="button"
               className={reconnectButtonClassName}
-              onClick={() => void reconnect()}
+              onClick={() => void reconnect("manual")}
               disabled={reconnecting}
             >
               {reconnecting
@@ -652,12 +755,12 @@ function AgentConversation({ sessionId }: { sessionId: string }) {
       </div>
 
       <form className={composerWrapClassName} onSubmit={sendTurn}>
-        {state.configOptions.length > 0
+        {otherOptions.length > 0
           ? (
             <AgentConfigBar
-              options={state.configOptions}
+              options={otherOptions}
               changingConfigId={changingConfigId}
-              disabled={state.phase !== "live" || !attached || turnBusy}
+              disabled={configDisabled}
               onChange={(option, value) => void changeConfig(option, value)}
             />
           )
@@ -674,22 +777,153 @@ function AgentConversation({ sessionId }: { sessionId: string }) {
             rows={1}
             aria-label="Message agent"
           />
-          <button
-            type="submit"
-            className={sendButtonClassName}
-            disabled={!canSend}
-            aria-label="Send message"
-            title="Send message"
-          >
-            {sending
-              ? <LoaderCircle size={15} className="animate-spin" />
-              : <ArrowUp size={15} strokeWidth={2.4} />}
-          </button>
+          <div className={composerFooterClassName}>
+            <AgentComposerConfigGroup
+              options={modeOptions}
+              changingConfigId={changingConfigId}
+              disabled={configDisabled}
+              onChange={(option, value) => void changeConfig(option, value)}
+            />
+            <div className={composerActionsClassName}>
+              <AgentComposerSettings
+                options={rightComposerOptions}
+                changingConfigId={changingConfigId}
+                disabled={configDisabled}
+                onChange={(option, value) => void changeConfig(option, value)}
+              />
+              <button
+                type="submit"
+                className={sendButtonClassName}
+                disabled={!canSend}
+                aria-label="Send message"
+                title="Send message"
+              >
+                {sending
+                  ? <LoaderCircle size={15} className="animate-spin" />
+                  : <ArrowUp size={15} strokeWidth={2.4} />}
+              </button>
+            </div>
+          </div>
         </div>
         <div className={composerHintClassName}>
           Enter to send · Shift+Enter for a new line
         </div>
       </form>
+    </div>
+  );
+}
+
+function AgentComposerSettings({
+  options,
+  changingConfigId,
+  disabled,
+  onChange,
+}: {
+  options: AgentConfigOption[];
+  changingConfigId?: string;
+  disabled: boolean;
+  onChange: (option: AgentConfigOption, value: string | boolean) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const summaryOptions = [
+    options.find((option) => option.category?.type === "model"),
+    options.find((option) => option.category?.type === "thoughtLevel"),
+  ].filter((option): option is AgentConfigOption => option !== undefined);
+
+  useEffect(() => {
+    if (!open) return;
+    function closeOnOutsidePointer(event: PointerEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function closeOnEscape(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  if (options.length === 0) return null;
+  const summary = summaryOptions.length > 0
+    ? summaryOptions.map(agentConfigCurrentLabel).join(" · ")
+    : "Settings";
+
+  return (
+    <div ref={rootRef} className="relative flex-none">
+      <button
+        type="button"
+        className={composerSettingsTriggerClassName}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        title={summary}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
+          {summary}
+        </span>
+        {changingConfigId
+          ? <LoaderCircle size={10} className="flex-none animate-spin" />
+          : (
+            <ChevronDown
+              size={11}
+              className={`flex-none text-rieul-text-3 transition-transform ${
+                open ? "rotate-180" : ""
+              }`}
+            />
+          )}
+      </button>
+      {open
+        ? (
+          <div
+            className={composerSettingsPopoverClassName}
+            role="dialog"
+            aria-label="Model and effort settings"
+          >
+            {options.map((option) => (
+              <AgentConfigControl
+                key={option.configId}
+                option={option}
+                changing={changingConfigId === option.configId}
+                disabled={disabled || changingConfigId !== undefined}
+                expanded
+                onChange={(value) => onChange(option, value)}
+              />
+            ))}
+          </div>
+        )
+        : null}
+    </div>
+  );
+}
+
+function AgentComposerConfigGroup({
+  options,
+  changingConfigId,
+  disabled,
+  onChange,
+}: {
+  options: AgentConfigOption[];
+  changingConfigId?: string;
+  disabled: boolean;
+  onChange: (option: AgentConfigOption, value: string | boolean) => void;
+}) {
+  if (options.length === 0) return null;
+  return (
+    <div className={composerConfigGroupClassName}>
+      {options.map((option) => (
+        <AgentConfigControl
+          key={option.configId}
+          option={option}
+          changing={changingConfigId === option.configId}
+          disabled={disabled || changingConfigId !== undefined}
+          compact
+          onChange={(value) => onChange(option, value)}
+        />
+      ))}
     </div>
   );
 }
@@ -708,62 +942,111 @@ function AgentConfigBar({
   return (
     <div className={configBarClassName} aria-label="Agent session settings">
       <SlidersHorizontal size={12} className="flex-none text-rieul-text-3" />
-      {options.map((option) => {
-        const changing = changingConfigId === option.configId;
-        if (option.input.type === "select") {
-          return (
-            <label
-              key={option.configId}
-              className={configControlClassName}
-              title={option.description}
-            >
-              <span className="whitespace-nowrap">{option.title}</span>
-              <select
-                className={configSelectClassName}
-                value={option.input.currentValue}
-                disabled={disabled || changingConfigId !== undefined}
-                onChange={(event) =>
-                  onChange(option, event.currentTarget.value)}
-                aria-label={option.title}
-              >
-                <AgentConfigSelectOptions option={option} />
-              </select>
-              {changing
-                ? <LoaderCircle size={10} className="animate-spin" />
-                : null}
-            </label>
-          );
-        }
-        if (option.input.type === "boolean") {
-          return (
-            <label
-              key={option.configId}
-              className={configControlClassName}
-              title={option.description}
-            >
-              <span className="whitespace-nowrap">{option.title}</span>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={option.input.currentValue}
-                aria-label={option.title}
-                className={`${configToggleClassName} ${
-                  option.input.currentValue
-                    ? "bg-rieul-accent after:translate-x-[12px]"
-                    : "bg-rieul-text-3/24"
-                }`}
-                disabled={disabled || changingConfigId !== undefined}
-                onClick={() => onChange(option, !option.input.currentValue)}
-              />
-              {changing
-                ? <LoaderCircle size={10} className="animate-spin" />
-                : null}
-            </label>
-          );
-        }
-        return null;
-      })}
+      {options.map((option) => (
+        <AgentConfigControl
+          key={option.configId}
+          option={option}
+          changing={changingConfigId === option.configId}
+          disabled={disabled || changingConfigId !== undefined}
+          onChange={(value) => onChange(option, value)}
+        />
+      ))}
     </div>
+  );
+}
+
+function AgentConfigControl({
+  option,
+  changing,
+  disabled,
+  compact = false,
+  expanded = false,
+  onChange,
+}: {
+  option: AgentConfigOption;
+  changing: boolean;
+  disabled: boolean;
+  compact?: boolean;
+  expanded?: boolean;
+  onChange: (value: string | boolean) => void;
+}) {
+  const controlClassName = compact
+    ? composerConfigControlClassName
+    : `${configControlClassName} ${expanded ? "w-full justify-between" : ""}`;
+  if (option.input.type === "select") {
+    return (
+      <label className={controlClassName} title={option.description}>
+        {compact
+          ? null
+          : <span className="whitespace-nowrap">{option.title}</span>}
+        <span className="ml-auto flex min-w-0 items-center gap-[5px]">
+          <select
+            className={compact
+              ? composerConfigSelectClassName
+              : configSelectClassName}
+            value={option.input.currentValue}
+            disabled={disabled}
+            onChange={(event) => onChange(event.currentTarget.value)}
+            aria-label={option.title}
+          >
+            <AgentConfigSelectOptions option={option} />
+          </select>
+          <span className="inline-flex w-[11px] flex-none justify-center">
+            {changing
+              ? <LoaderCircle size={10} className="animate-spin" />
+              : compact
+              ? <ChevronDown size={11} className="text-rieul-text-3" />
+              : null}
+          </span>
+        </span>
+      </label>
+    );
+  }
+  if (option.input.type === "boolean") {
+    return (
+      <label className={controlClassName} title={option.description}>
+        <span className="whitespace-nowrap">{option.title}</span>
+        <span className="ml-auto flex items-center gap-[5px]">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={option.input.currentValue}
+            aria-label={option.title}
+            className={`${configToggleClassName} ${
+              option.input.currentValue
+                ? "bg-rieul-accent after:translate-x-[12px]"
+                : "bg-rieul-text-3/24"
+            }`}
+            disabled={disabled}
+            onClick={() => onChange(!option.input.currentValue)}
+          />
+          <span className="inline-flex w-[11px] flex-none justify-center">
+            {changing
+              ? <LoaderCircle size={10} className="animate-spin" />
+              : null}
+          </span>
+        </span>
+      </label>
+    );
+  }
+  return null;
+}
+
+function agentConfigCurrentLabel(option: AgentConfigOption) {
+  if (option.input.type === "select") {
+    return option.input.options.find((value) =>
+      value.value === option.input.currentValue
+    )?.title ?? option.input.currentValue;
+  }
+  if (option.input.type === "boolean") {
+    return `${option.title} ${option.input.currentValue ? "On" : "Off"}`;
+  }
+  return option.title;
+}
+
+function isCollaborationModeOption(option: AgentConfigOption) {
+  return [option.configId, option.title].some((value) =>
+    value.toLowerCase().replaceAll(/[^a-z0-9]/g, "") === "collaborationmode"
   );
 }
 
@@ -1237,6 +1520,19 @@ function composerPlaceholder(
     return "The agent process is not attached";
   }
   return "Message the agent…";
+}
+
+function autoReconnectDelayMs(timeoutCount: number): number {
+  if (timeoutCount <= 0) return 0;
+  return Math.min(
+    1_000 * 2 ** (timeoutCount - 1),
+    MAX_AUTO_RECONNECT_DELAY_MS,
+  );
+}
+
+function isTimeoutError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b(?:timed out|timeout)\b/i.test(message);
 }
 
 function errorMessage(error: unknown): string {
